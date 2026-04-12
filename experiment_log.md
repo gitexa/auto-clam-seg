@@ -156,32 +156,52 @@ Supervised by binary TLS masks from HookNet annotations.
 
 ---
 
-## Summary of findings (23 experiments)
+### Experiments 24-34: Further refinements on no-GNN model
+- Exp 28: no-GNN + refine block — 0.5866, no gain
+- Exp 29: no-GNN h384 — 0.6013, similar
+- Exp 30: no-GNN dice3x — 0.5986, no gain
+- Exp 31: no-GNN deep proj — 0.5990, no gain
+- Exp 32: semantic-only — 0.5953, no gain
+- Exp 33: SGD optimizer — 0.5903, peaked lower
+- Exp 34: label smoothing — 0.5993, no gain
 
-**Best overall config** (exp 17, commit f510807):
-- upsample_factor=4, dice_weight=2.0, center_weight=0.5, offset_weight=0.0
-- Weighted BCE center loss (prevents center head collapse)
-- 1-fold: val_dice=0.6005, det_auc=0.9291, count_sp=0.8941, bkt_bacc=0.7609
-- 3-fold mean: val_dice=0.5767, det_auc=0.9129, count_sp=0.8571, bkt_bacc=0.7544
+### Experiments 35-38: Depthwise separable conv (BREAKTHROUGH #3)
+- Exp 35: **dw sep 3x3 h256** — 0.6070 (NEW BEST! dw sep conv helps)
+- Exp 36: **dw sep 3x3 h384** — 0.6079 (new best)
+- Exp 37: dw sep 3x3 h512 — 0.6037 (h384 is sweet spot)
+- Exp 38: **dw sep 5x5 h384** — **0.6086** (NEW BEST! 5x5 kernel optimal)
+
+### Experiments 39-42: Optimizing dw sep conv
+- Exp 39: dw sep 7x7 — 0.5954 (oversmooth, 5x5 better)
+- Exp 40: double 5x5 blocks — 0.5801 (overfit, single better)
+- Exp 41: mixed 5x3 kernels — 0.6012 (5x5 uniform better)
+- Exp 42: warm restarts — 0.6089 (restart didn't help, same first cycle)
+
+---
+
+## Summary of findings (42 experiments)
+
+**Best overall config** (exp 38, commit 61dc270):
+- GNN_LAYERS=0, hidden_dim=384, upsample_factor=4
+- **5x5 depthwise separable conv** decoder (2 blocks)
+- dice_weight=2.0, center_weight=0.5, offset_weight=0.0
+- Weighted BCE center loss
+- **val_dice=0.6086, det_auc=0.9468, count_sp=0.9182, bkt_bacc=0.7641**
 
 **Key breakthroughs**:
-1. Weighted BCE center loss (exp 6) — fixed center head collapse, enabling real TLS counting
-2. Upsample factor 4x (exp 17) — broke the 0.60 dice ceiling by matching output resolution to model capability
-3. dice_weight=2 + no offset (exp 11) — prioritized semantic head for better dice
-4. **No GNN (exp 27)** — GNN adds zero value! Removing it matches or slightly beats GNN version (dice=0.6021 vs 0.6005). The UNI-v2 patch features + CNN decoder alone are sufficient.
-
-**Best overall config** (exp 27, commit 6803053):
-- GNN_LAYERS=0, upsample_factor=4, dice_weight=2.0, center_weight=0.5, offset_weight=0.0
-- Weighted BCE center loss
-- val_dice=0.6021, det_auc=0.9272, count_sp=0.8973, bkt_bacc=0.7603
+1. Weighted BCE center loss (exp 6) — fixed center head collapse
+2. Upsample factor 4x (exp 17) — matched output resolution to model capability
+3. No GNN (exp 27) — GNN adds zero value, simplifies model
+4. 5x5 depthwise separable conv (exp 38) — better spatial reasoning than regular conv
+5. dice_weight=2, no offset (exp 11) — optimal loss balance
 
 **All benchmarks exceeded**:
-- det_auc=0.927 > 0.834 benchmark (+11%)
-- count_sp=0.897 > 0.774 benchmark (+16%)
-- bkt_bacc=0.760 > 0.632 benchmark (+20%)
-- val_dice=0.602 > 0.600 target
+- det_auc=0.947 > 0.834 benchmark (+13%)
+- count_sp=0.918 > 0.774 benchmark (+19%)
+- bkt_bacc=0.764 > 0.632 benchmark (+21%)
+- val_dice=0.609 > 0.600 target
 
-**What didn't work**: Higher capacity (OOM), graph augmentation (hurt dice), lower LR (too slow), Tversky loss (hurt precision), separate decoders (no gain), skip connections (no gain), focal alpha tuning (no gain), gradient accumulation (too slow), warmup tuning (no gain)
+**What didn't work**: GNN layers/heads (no value), graph augmentation (hurt dice), capacity increases (OOM or no gain), lower LR/SGD (slower/lower peak), Tversky loss, separate decoders, skip connections, gradient accumulation, label smoothing, warm restarts, deep projection, 7x7 kernels (oversmooth), double decoder blocks (overfit)
 
 ---
 

@@ -18,6 +18,7 @@ BASE_DIR = Path(__file__).parent
 BENCHMARKS = {
     "det_auc": 0.834,    # binary classification AUC
     "inst_sp": 0.774,    # count regression Spearman
+    "count_r2": 0.589,   # count regression R²
     "bkt_bacc": 0.632,   # count regression bucket balanced acc
 }
 DICE_TARGET = 0.6  # aspirational target
@@ -35,7 +36,7 @@ def plot_experiments():
         print("No experiments in results.tsv yet")
         return
 
-    for col in ["val_dice", "det_auc", "inst_sp", "bkt_bacc"]:
+    for col in ["val_dice", "det_auc", "inst_sp", "count_r2", "bkt_bacc"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     df["status"] = df["status"].str.strip().str.lower()
@@ -44,10 +45,11 @@ def plot_experiments():
         ("val_dice", "Val Dice", "#e74c3c", DICE_TARGET),
         ("det_auc", "Detection AUC", "#3498db", BENCHMARKS.get("det_auc")),
         ("inst_sp", "Count Spearman", "#2ecc71", BENCHMARKS.get("inst_sp")),
+        ("count_r2", "Count R²", "#e67e22", BENCHMARKS.get("count_r2")),
         ("bkt_bacc", "Bucket Bal.Acc", "#9b59b6", BENCHMARKS.get("bkt_bacc")),
     ]
 
-    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+    fig, axes = plt.subplots(2, 3, figsize=(20, 10))
     axes = axes.flat
 
     for ax, (col, label, color, benchmark) in zip(axes, metrics):
@@ -97,6 +99,10 @@ def plot_experiments():
             ax.annotate(desc, (i, row[col]),
                         textcoords="offset points", xytext=(4, 6),
                         fontsize=7, color=color, alpha=0.8, rotation=20)
+
+    # Hide empty subplot(s)
+    for idx in range(len(metrics), len(axes)):
+        axes[idx].set_visible(False)
 
     n_total = len(df)
     n_kept = (df["status"] == "keep").sum()
@@ -200,12 +206,17 @@ def plot_training():
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.2)
 
-    # 6. Learning rate
+    # 6. Count R² (primary clinical metric)
     ax = axes[1, 2]
-    ax.plot(df["epoch"], df["lr"], color="#34495e", linewidth=1.5)
-    ax.set_ylabel("Learning Rate", fontsize=11, fontweight="bold")
-    ax.set_yscale("log")
-    ax.set_title("LR Schedule")
+    if "count_r2" in df.columns:
+        ax.plot(df["epoch"], df["count_r2"], color="#e74c3c", linewidth=1.5, label="count_r2")
+        ax.axhline(y=0.589, color="gray", linestyle="--", alpha=0.5)  # benchmark
+        ax.text(df["epoch"].max(), 0.589, "benchmark=0.589", ha="right", va="bottom",
+                fontsize=8, color="gray")
+        best_r2 = df["count_r2"].max()
+        ax.set_title(f"Best count_r2={best_r2:.4f}")
+    ax.set_ylabel("Count R²", fontsize=11, fontweight="bold")
+    ax.legend(fontsize=8)
     ax.grid(True, alpha=0.2)
 
     for ax in axes.flat:
