@@ -1,0 +1,15 @@
+# Worktrees
+clam-worktree/
+
+# Runtime files
+.run_pid
+run_stdout.log
+run_stderr.log
+
+# Python
+__pycache__/
+*.pyc
+
+# Images (generated)
+*.png
+.claude/

@@ -1,0 +1,67 @@
+# @package _global_
+# Segmentation task config — TLS pixel-level segmentation
+# Used by train_segmentation.py
+
+segmentation:
+  # Run metadata
+  run_description: "gatv2_focal_dice_stratified"
+
+  # Model
+  feature_dim: 1536
+  hidden_dim: 256
+  gnn_layers: 2
+  gnn_heads: 4
+  upsample_factor: 8
+  dropout: 0.1
+  patch_size: 256
+
+  # Training
+  seed: 42
+  lr: 1e-4
+  weight_decay: 1e-4
+  epochs: 50
+  patience: 10
+  stop_epoch: 10
+  k_folds: 1
+  num_workers: 16
+  data_fraction: 1.0  # 1.0 for full data
+  n_classes: 1  # 1=TLS only, 2=TLS+GC (when GC masks available)
+
+  # Loss
+  focal_alpha: 0.75
+  focal_gamma: 2.0
+  dice_weight: 1.0
+  focal_weight: 1.0
+
+  # Augmentation (graph-level)
+  augment: true
+  coord_jitter: 0.05       # fraction of patch_size added as noise
+  edge_drop_rate: 0.1      # drop 10% of graph edges
+  patch_drop_rate: 0.05    # zero out 5% of patch features
+
+  # Bucket evaluation (matches regression pipeline)
+  bucket_edges: [1, 10]      # TLS instance count bucket edges
+  bucket_names: ["<1", "1-10", "10+"]
+
+  # Visualization
+  n_vis_slides: 8
+  vis_every_n_epochs: 5
+
+  # Checkpointing
+  resume: false
+
+  # W&B
+  wandb_project: "tls"
+  wandb_entity: "ajhaas"
+  log_to_wandb: true
+
+  # Paths
+  zarr_dirs:
+    blca: "/home/ubuntu/ahaas-persistent-std-tcga/data/tcga-blca/representations_tif_trident/20x_256px_0px_overlap/features_uni_v2_grandqc_zarr"
+    kirc: "/home/ubuntu/ahaas-persistent-std-tcga/data/tcga-kirc/representations_tif_trident/20x_256px_0px_overlap/features_uni_v2_grandqc_zarr"
+    lusc: "/home/ubuntu/ahaas-persistent-std-tcga/data/tcga-lusc/representations_tif_trident/20x_256px_0px_overlap/features_uni_v2_grandqc_zarr"
+  mask_dir: "/home/ubuntu/ahaas-persistent-std-tcga/data/metadata/annotations/hooknet/masks_tls_official"
+  mask_cache_dir: "/home/ubuntu/ahaas-persistent-std-tcga/data/metadata/annotations/hooknet/mask_cache"
+  meta_csv: "/home/ubuntu/ahaas-persistent-std-tcga/data/metadata/clam_training/df_summary_v10.csv"
+  test_csv: "/home/ubuntu/ahaas-persistent-std-tcga/data/metadata/clam_training/df_summary_v10_test.csv"
+  experiments_base: "/home/ubuntu/ahaas-persistent-std-tcga/experiments"
