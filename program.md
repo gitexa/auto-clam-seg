@@ -72,16 +72,25 @@ In `clam-worktree/`:
 | Binary classification | balanced_acc | 0.783 |
 | TLS count regression | Spearman | 0.774 |
 | TLS count regression | R² | 0.589 |
+| TLS count regression | MAE | 0.593 |
 | TLS count regression | bucket_balanced_acc | 0.632 |
 
-### Best TLS-only results (50 experiments):
-| Metric | Best 1-fold | 3-fold mean | Config |
-|--------|------------|-------------|--------|
-| val_dice_tls | 0.609 | 0.574 | 5x5 dw sep, h384, no GNN |
-| det_auc | 0.947 | 0.888 | same |
-| count_sp | 0.918 | 0.817 | same |
-| count_r2 | 0.876 | — | counting-optimized |
-| bkt_bacc | 0.798 | 0.728 | balanced config |
+### Metrics tracked per epoch:
+**TLS**: val_dice, count_sp, count_r2, count_mae, count_median_ae, det_auc, bkt_bacc
+**GC**: dice_gc, gc_count_sp, gc_count_r2, gc_count_mae, gc_count_median_ae, gc_det_auc
+**GC hard cases**: gc_low_tls_rec (GC recall in <5 TLS slides), gc_high_tls_fp (FP rate in ≥10 TLS no-GC slides)
+
+### Best v2.0 results (65+ experiments):
+| Metric | TLS | GC | Benchmark |
+|--------|-----|-----|-----------|
+| count_sp | **0.902** | **0.795** | 0.774 |
+| count_r2 | **0.863** | **0.792** | 0.589 |
+| det_auc | **0.944** | **0.893** | 0.834 |
+| bkt_bacc | **0.774** | — | 0.632 |
+| dice | 0.593 | 0.000* | 0.600 |
+| gc_high_tls_fp | — | 14-20% | — |
+
+*GC dice=0 due to extreme sparsity at patch resolution (31 median GC pixels at 4x). GC counting works via center head.
 
 ### GC targets (new):
 - dice_gc > 0.3 (first target — GC is very sparse)
