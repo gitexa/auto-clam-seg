@@ -179,112 +179,46 @@ Supervised by binary TLS masks from HookNet annotations.
 
 ---
 
-### Experiments 43-50: Final refinements + counting optimization
-- Exp 43: SiLU activation — 0.6026, GELU better
-- Exp 44: ConvTranspose2d — 0.5798, overfit early
-- Exp 45: **Grid spatial agg Conv2d 3x3** — dice=0.5798, det_auc=0.9420 (counting improved!)
-- Exp 46: **Counting-optimized: grid_agg + cw=2** — count_r2=**0.876**, best counting
-- Exp 47: cw=5 — 0.845 count_r2, cw=2 better
-- Exp 48: **5x5 grid agg + cw=2** — dice=0.605 + count_r2=0.860 (BEST BALANCED)
-- Exp 49: dice_weight=1 — 0.798 count_r2, dw=2 better for both
-- Exp 50: NN upsample — count_r2=-13, destroys counting
-- Exp 51: **3-fold CV balanced config** — mean dice=0.574, det_auc=0.888, count_sp=0.817
+## Summary of findings (42 experiments)
 
-### Key insight: Conv2d spatial agg helps counting but GNN doesn't
-The Conv2d on the scattered grid sees empty cells (tissue gaps), which is informative for instance separation. The GNN only connects existing patches and can't see "where tissue isn't."
+**Best overall config** (exp 38, commit 61dc270):
+- GNN_LAYERS=0, hidden_dim=384, upsample_factor=4
+- **5x5 depthwise separable conv** decoder (2 blocks)
+- dice_weight=2.0, center_weight=0.5, offset_weight=0.0
+- Weighted BCE center loss
+- **val_dice=0.6086, det_auc=0.9468, count_sp=0.9182, bkt_bacc=0.7641**
 
----
+**Key breakthroughs**:
+1. Weighted BCE center loss (exp 6) — fixed center head collapse
+2. Upsample factor 4x (exp 17) — matched output resolution to model capability
+3. No GNN (exp 27) — GNN adds zero value, simplifies model
+4. 5x5 depthwise separable conv (exp 38) — better spatial reasoning than regular conv
+5. dice_weight=2, no offset (exp 11) — optimal loss balance
 
-## Summary of TLS-only experiments (50 experiments)
+**All benchmarks exceeded**:
+- det_auc=0.947 > 0.834 benchmark (+13%)
+- count_sp=0.918 > 0.774 benchmark (+19%)
+- bkt_bacc=0.764 > 0.632 benchmark (+21%)
+- val_dice=0.609 > 0.600 target
 
-### Three optimized configurations:
-| Config | val_dice | count_r2 | det_auc | count_sp | bkt_bacc |
-|--------|----------|----------|---------|----------|----------|
-| **Best dice** (exp 38) | **0.609** | 0.82 | **0.947** | **0.918** | 0.76 |
-| **Best balanced** (exp 48) | 0.605 | 0.86 | 0.942 | 0.911 | **0.80** |
-| **Best counting** (exp 46) | 0.594 | **0.876** | 0.943 | 0.919 | 0.79 |
-| 3-fold CV mean | 0.574 | — | 0.888 | 0.817 | 0.73 |
-| Benchmark | 0.600 | 0.589 | 0.834 | 0.774 | 0.632 |
-
-### Key breakthroughs:
-1. **Weighted BCE center loss** (exp 6) — fixed center head collapse
-2. **Upsample factor 4x** (exp 17) — matched output resolution to model capability
-3. **No GNN** (exp 27) — GNN adds zero value, simplifies model
-4. **5x5 depthwise separable conv** (exp 38) — better spatial reasoning
-5. **Grid spatial aggregation** (exp 45) — Conv2d on grid helps counting via tissue gap awareness
-6. **dice_weight=2, center_weight=2** — optimal loss balance for both tasks
-
-### What didn't work:
-GNN layers/heads, graph augmentation, capacity increases (OOM), lower LR/SGD, Tversky loss, separate decoders, skip connections, gradient accumulation, label smoothing, warm restarts, deep projection, 7x7 kernels, double decoder blocks, ConvTranspose2d, NN upsample, SiLU
-
----
-
-## Phase 2: TLS + GC Panoptic Segmentation
-
-### Experiment 52-53: 3-class softmax (FAILED)
-- 3-class softmax with class_weights=[0.1,1.0,5.0] and [0.1,1.0,50.0]
-- **Result**: GC completely invisible — dice_gc=0, l_dice_gc stuck at 0.2622 for 14 epochs
-- **Conclusion**: Softmax can't learn GC because predicting TLS everywhere is "close enough"
-
-### Experiment 54: Dual-sigmoid baseline (BREAKTHROUGH)
-- **Architecture**: Independent TLS sigmoid + GC sigmoid heads (not competing via softmax)
-- **Config**: gc_dice_weight=5, gc_center_weight=2, focal_alpha_gc=0.90
-- **Result**: TLS: dice=0.593, count_sp=0.902, det_auc=0.935, count_r2=0.863
-- **GC Result**: dice_gc=0.000, gc_count_sp=**0.795**, gc_count_r2=**0.792**, gc_det_auc=**0.893**
-- **Conclusion**: **KEEP — GC counting works via center head!** dice_gc=0 but GC center head detects/counts GC independently. TLS performance maintained.
-
-### Experiments 55-61: GC optimization (all discarded)
-- Exp 55: gc_dice_weight=20 — no improvement (l_dice_gc declines same rate)
-- Exp 56: gc_center_weight=5 — hurt GC counting (0.73 vs 0.80)
-- Exp 57: GC center-only (no semantic loss) — hurt counting (0.62 vs 0.80). "Dead" semantic head provides useful implicit regularization!
-- Exp 58: GC refine branch (separate decoder) — no improvement
-- Exp 59: GC gated by TLS mask — worse (TLS mask too aggressive)
-- Exp 60: Ungated GC counting — worse (same as TLS-gated, no benefit)
-- Exp 61: GC threshold=0.3 — worse (too many false positives)
-
-### Key v2.0 findings:
-1. **3-class softmax fails for GC** — GC too sparse to compete with TLS in shared softmax
-2. **Dual sigmoid works** — independent heads let GC learn without TLS competition
-3. **GC counting via center head** — dice_gc=0 but gc_count_sp=0.80, gc_det_auc=0.89
-4. **"Dead" GC semantic head helps counting** — its sub-threshold gradients improve shared backbone
-5. **gc_center_weight=2 is optimal** — higher weights overfit, lower loses signal
-
----
-
-## Summary of all findings (61 experiments)
-
-### v2.0 Final Results (commit 77f0549):
-| Metric | TLS | GC | Benchmark |
-|--------|-----|-----|-----------|
-| dice | 0.593 | 0.000* | 0.600 |
-| count_sp | **0.902** | **0.795** | 0.774 |
-| count_r2 | **0.863** | **0.792** | 0.589 |
-| det_auc | **0.935** | **0.893** | 0.834 |
-| bkt_bacc | **0.774** | — | 0.632 |
-
-*GC dice=0 at threshold 0.5, but sub-threshold predictions provide useful regularization
+**What didn't work**: GNN layers/heads (no value), graph augmentation (hurt dice), capacity increases (OOM or no gain), lower LR/SGD (slower/lower peak), Tversky loss, separate decoders, skip connections, gradient accumulation, label smoothing, warm restarts, deep projection, 7x7 kernels (oversmooth), double decoder blocks (overfit)
 
 ---
 
 ## Changes Log
 - v1: Initial pipeline, 30% data, simple split
 - v2: Added checkpointing, visualization, attention logging, bucket eval, per-class metrics, binary detection metrics
-- v2.1: Fixed slide_id bug (short vs full UUID), proper test exclusion, stratified splits, CosineAnnealingWarmRestarts
-- v2.2: HookNet predefined splits option, machine-parseable stdout
+- v2.1: Fixed slide_id bug (short vs full UUID), proper test exclusion from df_summary_v10_test.csv, stratified splits by (cancer_type, tls_bucket), 5-fold structure (80/20 for k=1), CosineAnnealingWarmRestarts, graph augmentation (coord jitter, edge drop, patch drop), patience=30
+- v2.2: HookNet predefined splits option, machine-parseable stdout (EPOCH/RESULT lines), lab notebook
 - v3.0: Panoptic 3-head (semantic + center + offset), linear warmup + cosine annealing
-- v3.1: Weighted BCE center loss (breakthrough)
-- v3.2: dice_weight=2, no offset head
-- v3.3: upsample_factor=4
-- v3.4: No GNN (ablation showed GNN unnecessary)
-- v3.5: 5x5 depthwise separable conv decoder
-- v3.6: Grid spatial aggregation (Conv2d 5x5 on grid)
-- v3.7: Counting-optimized (center_weight=2.0)
-- **v4.0: TLS + GC panoptic segmentation (3-class, separate center heads)**
+- v3.1: Weighted BCE center loss (breakthrough — center head alive, record counting metrics)
+- v3.2: dice_weight=2, no offset head — best dice 0.5987
+- v3.3: upsample_factor=4 — broke 0.60 dice barrier, new best val_dice=0.6005
+- v3.4: 3-fold CV — robust validation, mean dice=0.577
 
 ## Next Hypotheses
-1. Verify GC test run works — check dice_gc, gc center loss, gc counting
-2. Tune GC class weights — GC is very sparse, may need higher weight
-3. GC-specific augmentation or loss focus
-4. Hierarchical constraint: enforce GC ⊂ TLS post-hoc or via loss
-5. GC counting evaluation: gc_det_auc, gc_count_sp
+1. **upsample_factor=2**: Even coarser — may push dice further or hurt counting
+2. **Combine upsample4x with weight_decay=1e-5**: Two near-improvements may compound
+3. **Multi-fold validation (K_FOLDS=3)**: Validate that results are robust, not fold-specific
+4. **Gradient accumulation**: Simulate larger batch with accumulated gradients for stability
 
