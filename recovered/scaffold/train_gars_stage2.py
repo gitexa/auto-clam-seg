@@ -29,6 +29,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -198,38 +199,28 @@ class TLSPatchDataset(torch.utils.data.Dataset):
         }
 
 
-def build_tls_patch_dataset(
-    *,
-    patch_size: int = 256,
-    cache_path: str | None = None,
-    test_csv: str | None = None,
+def slide_level_split(
+    bundle: dict,
+    val_frac: float = 0.157,
+    seed: int = 42,
 ):
-    """Walk all slides, find TLS-positive patches, return (features, masks).
-
-    This is a re-implementation skeleton — the original lived in the
-    `train_gars_stage2.py` we lost. Two valid options:
-
-    1. Re-use `prepare_segmentation.load_mask_from_tif` with
-       upsample_factor=patch_size to get per-patch native-resolution
-       masks; iterate patches per slide, save (feat, mask_tile_256) for
-       each patch where mask>0.
-
-    2. Open the HookNet TIF directly with `tifffile` at its full mpp,
-       crop per-patch 256×256 tiles using the slide's annotation→pixel
-       scale.
-
-    The recovered output.log says ~30 s/slide for option 1 with caching;
-    final dataset is 26 364 patches (1 869 with GC) over 605 slides.
-
-    Implement once, then use `cache_path` to memoise as a single .pt.
+    """Split by patient (not patch) so the same patient never appears in
+    both train and val. Recovered val ratio: 4124/26364 ≈ 0.157.
     """
-    raise NotImplementedError(
-        "Plug in your TLS-patch loader here. Recovered shape spec:\n"
-        "  features: (N=26364, 1536) float32\n"
-        "  masks:    (N=26364, 256, 256) uint8 in {0, 1, 2}\n"
-        "Memory budget: ~1.9 GB. Use prepare_segmentation.build_slide_entries() "
-        "+ prepare_segmentation.load_mask_from_tif(upsample_factor=patch_size)."
+    slide_ids = bundle["slide_ids"]
+    patients = sorted({patient_id_from_slide(s) for s in slide_ids})
+    rng = np.random.default_rng(seed)
+    rng.shuffle(patients)
+    n_val_p = max(1, int(val_frac * len(patients)))
+    val_patients = set(patients[:n_val_p])
+    from tls_patch_dataset import patient_id_from_slide
+    is_val = np.array(
+        [patient_id_from_slide(s) in val_patients for s in slide_ids],
+        dtype=bool,
     )
+    val_idx = np.where(is_val)[0]
+    train_idx = np.where(~is_val)[0]
+    return train_idx, val_idx, len(val_patients)
 
 
 # ─── Schedulers ───────────────────────────────────────────────────────
@@ -309,16 +300,20 @@ def main():
     print(f"Device: {device}")
 
     # ─ Data ─
-    print("Building TLS patch dataset (pre-loading features + masks)...")
-    features, masks = build_tls_patch_dataset(cache_path=args.cache_path)
-    n = features.shape[0]
-    n_val = int(0.157 * n)  # 4124/26364 ≈ 0.157, the recovered split ratio
-    perm = torch.randperm(n, generator=torch.Generator().manual_seed(args.seed))
-    val_idx = perm[:n_val]
-    train_idx = perm[n_val:]
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from tls_patch_dataset import build_tls_patch_dataset
+    bundle = (
+        build_tls_patch_dataset()
+        if args.cache_path is None
+        else build_tls_patch_dataset(cache_path=args.cache_path)
+    )
+    features = bundle["features"]
+    masks = bundle["masks"]
+    train_idx, val_idx, n_val_patients = slide_level_split(bundle, seed=args.seed)
     train_ds = TLSPatchDataset(features[train_idx], masks[train_idx])
     val_ds = TLSPatchDataset(features[val_idx], masks[val_idx])
-    print(f"Split: {len(train_ds)} train, {len(val_ds)} val patches")
+    print(f"Split: {len(train_ds)} train, {len(val_ds)} val patches "
+          f"({n_val_patients} val patients)")
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
                               num_workers=4, pin_memory=True)

@@ -13,6 +13,8 @@ that reproduces the same `GraphTLSDetector` (Stage 1) and
 | `verify_stage1_ckpt.py` | Loads every recovered Stage 1 checkpoint with `strict=True` |
 | `train_gars_stage2.py` | Stage 2: UNIv2PixelDecoder training (per-patch 3-class segmentation) |
 | `verify_stage2_ckpt.py` | Loads every recovered Stage 2 checkpoint with `strict=True` |
+| `tls_patch_dataset.py` | Stage 2 data loader: stage masks to local SSD, walk slides in parallel, build & cache the in-memory (features, masks) tensors |
+| `eval_gars_cascade.py` | Cascade eval: Stage 1 → threshold → Stage 2 → slide-level mDice / TLS dice / GC dice + counting metrics, sweep over thresholds |
 
 ## Architecture (verified exact)
 
@@ -150,15 +152,51 @@ linear warmup over 3 epochs then cosine decay to 0.
 2. **Activation in SpatialBasis** (between the two Linears): GELU
    assumed; index 1 in the `proj` Sequential has no params, so any
    parameter-less activation works.
-3. **TLS-patch loader**: not reconstructed. The recovered
-   `build_tls_patch_dataset()` raises `NotImplementedError` with the
-   shape spec (N=26 364, features (N, 1536), masks (N, 256, 256) uint8).
-   Plug in your loader; the original took ~30 s/slide and produced
-   ~1.9 GB of in-memory tensors.
+
+### Stage 2 — TLS-patch data loader
+
+`tls_patch_dataset.py` reproduces the recovered build pipeline:
+
+1. **Stages mask TIFs to local SSD** at first run
+   (`/home/ubuntu/local_data/hooknet_masks_tls_gc/`). The HookNet TIFs
+   live on NFS by default; one copy + per-patch reads from `/dev/vda1`
+   gives roughly an order of magnitude speedup. Idempotent — second
+   run skips already-copied files. This matches the recovered log
+   line `Found 767 masks on local SSD`.
+2. **Excludes test patients** (170, from `df_summary_v10_test.csv` —
+   matches `Loaded 170 test patients to exclude`). Patient ID is the
+   first 12 chars of the slide ID (TCGA-XX-XXXX).
+3. **Walks slides in parallel** (`ProcessPoolExecutor`, default 8
+   workers). Per slide: open the zarr (features + coords), open the
+   mask TIF at level 0 (native resolution, scale-down detection if
+   the mask is at a coarser MPP), crop a 256×256 mask tile per patch,
+   keep patches where `tile.max() > 0` (i.e., any TLS or GC pixel).
+4. **Concatenates and caches** the assembled tensors as a single .pt
+   at `/home/ubuntu/local_data/tls_patch_dataset.pt`. Subsequent runs
+   skip directly to the load.
+
+Output bundle:
+
+```
+features:     torch.float32,  (N, 1536)
+masks:        torch.uint8,    (N, 256, 256)        # values in {0, 1, 2}
+slide_ids:    list[str],      length N
+cancer_types: list[str],      length N             # {BLCA, KIRC, LUSC}
+patch_idx:    torch.int32,    (N,)                 # within-slide index
+```
+
+Memory: ~1.9 GB — fits in RAM for the full TCGA training set.
+
+`slide_level_split()` in `train_gars_stage2.py` partitions by
+**patient** (not patch) to avoid leak across the train/val boundary.
 
 ### Stage 2 — running
 
 ```bash
+# First run builds the cache (~30 s/slide × 605 slides ≈ 5 min);
+# every subsequent run loads it in ~1 s.
+python tls_patch_dataset.py
+
 # Reproduce the mn5jorov result (target mDice ≈ 0.714):
 python train_gars_stage2.py \
     --hidden_channels 64 --spatial_size 16 \
@@ -176,9 +214,38 @@ python verify_stage2_ckpt.py
 Output should end with `All OK` and confirm `forward(2, 1536) ->
 (2, 3, 256, 256)` for both variants.
 
+## Cascade evaluation
+
+`eval_gars_cascade.py` reproduces `gars_cascade_eval.log` and
+`gars_cascade_low_thresh.log`. Per slide:
+
+1. Stage 1 scores every patch → TLS probability.
+2. Threshold at `THR` → select TLS-positive patch indices.
+3. Stage 2 decodes each selected patch's UNI-v2 feature into a
+   256×256 3-class mask (batched, default 64 patches/batch).
+4. Stitch per-patch predictions into a slide-level patch-grid (one
+   class per patch with GC > TLS > bg precedence).
+5. Compare against the cached HookNet mask reduced to the same
+   patch-grid resolution → mDice / TLS dice / GC dice.
+6. Connected-component counting on the predicted grid → Spearman vs
+   ground-truth instance counts.
+
+```bash
+python eval_gars_cascade.py \
+    --stage1 /home/ubuntu/ahaas-persistent-std-tcga/experiments/\
+gars_stage1_gars_stage1_gatv2_3hop_v2_20260426_230650/best_checkpoint.pt \
+    --stage2 /home/ubuntu/ahaas-persistent-std-tcga/experiments/\
+gars_stage2_gars_stage2_univ2_decoder_20260427_102326/best_checkpoint.pt \
+    --thresholds 0.05 0.10 0.20 0.30 0.40 0.50
+```
+
+Target numbers (from recovered `gars_cascade_low_thresh.log` at thr=0.05):
+mDice 0.486, TLS dice 0.237, GC dice 0.734, TLS sp 0.771, GC sp 0.754,
+~0.4% of patches selected, ~0.41 s/slide.
+
 ## Next scaffolds
 
-Cascade evaluation, end-to-end joint, and the unified
-`GraphEnrichedDecoder` are the remaining pieces. The unified model has
-a recovered checkpoint at `qy3pj74h` so it could be rebuilt the same way;
-the cascade is just `Stage1 → threshold → Stage2`, no new model needed.
+End-to-end joint and the unified `GraphEnrichedDecoder` are the
+remaining pieces. The unified run `qy3pj74h` is crashed in wandb
+(no `output.log`/`config.yaml` recovered), so its architecture would
+have to be inferred purely from checkpoint shapes (~10.15 M params).
