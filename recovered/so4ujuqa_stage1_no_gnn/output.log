@@ -1,0 +1,54 @@
+
+Run: gars_stage1_gars_stage1_no_gnn_v2_20260426_230650
+Results: /home/ubuntu/ahaas-persistent-std-tcga/experiments/gars_stage1_gars_stage1_no_gnn_v2_20260426_230650
+Training 660 slides, validating 154 slides
+
+EPOCH epoch=1 train_loss=0.0382 train_recall=0.151 train_prec=0.145 train_f1=0.148 val_loss=0.0102 val_recall=0.301 val_prec=0.276 val_f1=0.288 val_selected=5145/2645697 lr=9.99e-04 train=423s val=104s BEST
+EPOCH epoch=2 train_loss=0.0316 train_recall=0.271 train_prec=0.259 train_f1=0.265 val_loss=0.0129 val_recall=0.459 val_prec=0.228 val_f1=0.305 val_selected=9457/2645697 lr=9.96e-04 train=393s val=90s BEST
+EPOCH epoch=3 train_loss=0.0296 train_recall=0.305 train_prec=0.289 train_f1=0.297 val_loss=0.0123 val_recall=0.425 val_prec=0.259 val_f1=0.321 val_selected=7727/2645697 lr=9.91e-04 train=390s val=105s BEST
+EPOCH epoch=4 train_loss=0.0290 train_recall=0.340 train_prec=0.295 train_f1=0.316 val_loss=0.0243 val_recall=0.579 val_prec=0.150 val_f1=0.238 val_selected=18199/2645697 lr=9.84e-04 train=396s val=103s
+EPOCH epoch=5 train_loss=0.0287 train_recall=0.343 train_prec=0.292 train_f1=0.316 val_loss=0.0116 val_recall=0.434 val_prec=0.263 val_f1=0.327 val_selected=7778/2645697 lr=9.76e-04 train=391s val=99s BEST
+EPOCH epoch=6 train_loss=0.0276 train_recall=0.371 train_prec=0.310 train_f1=0.338 val_loss=0.0172 val_recall=0.526 val_prec=0.195 val_f1=0.285 val_selected=12694/2645697 lr=9.65e-04 train=393s val=100s
+EPOCH epoch=7 train_loss=0.0275 train_recall=0.368 train_prec=0.311 train_f1=0.337 val_loss=0.0091 val_recall=0.326 val_prec=0.342 val_f1=0.334 val_selected=4483/2645697 lr=9.52e-04 train=389s val=101s BEST
+EPOCH epoch=8 train_loss=0.0270 train_recall=0.379 train_prec=0.317 train_f1=0.345 val_loss=0.0087 val_recall=0.293 val_prec=0.366 val_f1=0.325 val_selected=3760/2645697 lr=9.38e-04 train=394s val=97s
+EPOCH epoch=9 train_loss=0.0264 train_recall=0.390 train_prec=0.317 train_f1=0.350 val_loss=0.0085 val_recall=0.274 val_prec=0.392 val_f1=0.323 val_selected=3288/2645697 lr=9.22e-04 train=386s val=104s
+EPOCH epoch=10 train_loss=0.0258 train_recall=0.397 train_prec=0.322 train_f1=0.356 val_loss=0.0099 val_recall=0.347 val_prec=0.326 val_f1=0.336 val_selected=5009/2645697 lr=9.05e-04 train=390s val=95s BEST
+EPOCH epoch=11 train_loss=0.0253 train_recall=0.397 train_prec=0.332 train_f1=0.362 val_loss=0.0109 val_recall=0.376 val_prec=0.296 val_f1=0.332 val_selected=5974/2645697 lr=8.85e-04 train=383s val=102s
+EPOCH epoch=12 train_loss=0.0248 train_recall=0.407 train_prec=0.331 train_f1=0.365 val_loss=0.0103 val_recall=0.392 val_prec=0.281 val_f1=0.327 val_selected=6571/2645697 lr=8.65e-04 train=359s val=74s
+EPOCH epoch=13 train_loss=0.0243 train_recall=0.420 train_prec=0.330 train_f1=0.370 val_loss=0.0107 val_recall=0.354 val_prec=0.333 val_f1=0.343 val_selected=4998/2645697 lr=8.42e-04 train=343s val=74s BEST
+EPOCH epoch=14 train_loss=0.0241 train_recall=0.425 train_prec=0.339 train_f1=0.377 val_loss=0.0094 val_recall=0.338 val_prec=0.324 val_f1=0.331 val_selected=4902/2645697 lr=8.19e-04 train=305s val=73s
+EPOCH epoch=15 train_loss=0.0234 train_recall=0.438 train_prec=0.349 train_f1=0.389 val_loss=0.0104 val_recall=0.408 val_prec=0.261 val_f1=0.318 val_selected=7358/2645697 lr=7.94e-04 train=309s val=72s
+EPOCH epoch=16 train_loss=0.0223 train_recall=0.458 train_prec=0.348 train_f1=0.395 val_loss=0.0103 val_recall=0.311 val_prec=0.310 val_f1=0.311 val_selected=4716/2645697 lr=7.68e-04 train=304s val=72s
+EPOCH epoch=17 train_loss=0.0220 train_recall=0.456 train_prec=0.340 train_f1=0.389 val_loss=0.0098 val_recall=0.355 val_prec=0.295 val_f1=0.322 val_selected=5668/2645697 lr=7.41e-04 train=295s val=72s
+EPOCH epoch=18 train_loss=0.0214 train_recall=0.469 train_prec=0.362 train_f1=0.409 val_loss=0.0101 val_recall=0.328 val_prec=0.291 val_f1=0.308 val_selected=5302/2645697 lr=7.13e-04 train=305s val=73s
+EPOCH epoch=19 train_loss=0.0206 train_recall=0.482 train_prec=0.361 train_f1=0.413 val_loss=0.0105 val_recall=0.336 val_prec=0.266 val_f1=0.297 val_selected=5930/2645697 lr=6.84e-04 train=295s val=71s
+EPOCH epoch=20 train_loss=0.0197 train_recall=0.495 train_prec=0.363 train_f1=0.419 val_loss=0.0102 val_recall=0.276 val_prec=0.334 val_f1=0.302 val_selected=3890/2645697 lr=6.55e-04 train=305s val=73s
+EPOCH epoch=21 train_loss=0.0199 train_recall=0.498 train_prec=0.372 train_f1=0.426 val_loss=0.0105 val_recall=0.344 val_prec=0.275 val_f1=0.306 val_selected=5895/2645697 lr=6.25e-04 train=305s val=73s
+EPOCH epoch=22 train_loss=0.0187 train_recall=0.518 train_prec=0.374 train_f1=0.434 val_loss=0.0104 val_recall=0.340 val_prec=0.259 val_f1=0.294 val_selected=6170/2645697 lr=5.94e-04 train=307s val=72s
+EPOCH epoch=23 train_loss=0.0184 train_recall=0.524 train_prec=0.374 train_f1=0.436 val_loss=0.0093 val_recall=0.268 val_prec=0.324 val_f1=0.293 val_selected=3894/2645697 lr=5.63e-04 train=306s val=73s
+  Early stopping at epoch 23 (best=13, f1=0.343)
+
+Done. Best f1=0.343 at epoch 13
+Checkpoint: /home/ubuntu/ahaas-persistent-std-tcga/experiments/gars_stage1_gars_stage1_no_gnn_v2_20260426_230650/best_checkpoint.pt
+
+============================================================
+FINAL RESULTS (best epoch 13)
+============================================================
+  Recall:    0.354 (target >0.95)
+  Precision: 0.333
+  F1:        0.343
+  Accuracy:  0.998
+  Selected:  4998/2645697 patches
+  TP=1664 FP=3334 FN=3040 TN=2637659
+
+  Slides with recall < 0.9 (113):
+    TCGA-BL-A5ZZ-01Z-00-DX2.BB151354-01C6-43DE-ABCC-0B03468D54FF: recall=0.00 (0/3 TLS)
+    TCGA-BT-A3PH-01Z-00-DX1.18FB196C-9F66-4676-81DC-F58A0A5577D8: recall=0.00 (0/2 TLS)
+    TCGA-CF-A5UA-01Z-00-DX1.7352D4EB-46F5-4EAA-95B9-1D869E8291C3: recall=0.00 (0/5 TLS)
+    TCGA-DK-A1AD-01Z-00-DX1.1B438E00-C022-4CB8-994D-C4EE8E009F00: recall=0.00 (0/3 TLS)
+    TCGA-FD-A6TI-01Z-00-DX1.A451F82D-983B-4646-BFC6-E40A66F2B9C8: recall=0.00 (0/4 TLS)
+    TCGA-FD-A6TK-01Z-00-DX1.B685DA87-72A6-4C38-8AA1-40B6E543383C: recall=0.00 (0/1 TLS)
+    TCGA-UY-A9PA-01Z-00-DX1.A83A79FB-810C-42A4-8EC7-A3328D79542D: recall=0.00 (0/22 TLS)
+    TCGA-XF-A9SH-01Z-00-DX1.B1E33049-ABB8-4F2F-9D2D-503E48B8CDE5: recall=0.00 (0/1 TLS)
+    TCGA-XF-A9SL-01Z-00-DX1.AA56A70C-28E1-4140-9B15-72AB0D5051A6: recall=0.00 (0/2 TLS)
+    TCGA-XF-AAN4-01Z-00-DX1.F9F1800B-9945-4695-B851-A4585E9D56D6: recall=0.00 (0/11 TLS)

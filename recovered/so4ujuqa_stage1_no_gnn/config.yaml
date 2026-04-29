@@ -1,0 +1,13 @@
+lr: 0.001
+seed: 42
+n_val: 154
+epochs: 50
+n_hops: 0
+dropout: 0.1
+n_train: 660
+gnn_type: 'gcn'
+patience: 10
+hidden_dim: 256
+patch_size: 256
+pos_weight: 5
+weight_decay: 0.0001

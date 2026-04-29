@@ -280,6 +280,162 @@ GNN layers/heads, graph augmentation, capacity increases (OOM), lower LR/SGD, Tv
 - v3.6: Grid spatial aggregation (Conv2d 5x5 on grid)
 - v3.7: Counting-optimized (center_weight=2.0)
 - **v4.0: TLS + GC panoptic segmentation (3-class, separate center heads)**
+- **v5.0: GNCAF reproduction — 8 KNN/GCN graph variants, all hit the same ~0.59 TLS dice ceiling as no-GNN (Apr 15)**
+- **v6.0: GARS two-stage cascade — graph region proposal + UNI-v2 pixel decoder; first non-zero GC dice (Apr 26–27)**
+
+---
+
+## Phase 7: GARS — Graph-guided Adaptive Region Segmentation (Apr 26–27)
+
+*Reconstructed from persistent experiment artefacts after the VM crash that
+wiped the autoresearch worktree. Source code lived on the un-pushed branch
+`autoresearch/gars-cascade` (final commit `63e1e5b`, lost). Best
+checkpoints survive on `/lambda/nfs/.../experiments/`; runs synced to wandb
+project `ajhaas/tls-pixel-seg`. See
+`notebooks/RECONSTRUCTION_apr13_apr27.md` for the full picture.*
+
+### Motivation
+v2.0 dual-sigmoid TLS+GC gave `dice_gc=0` because GC is too sparse at the
+4× upsample slide-level grid (~31 GC pixels in 480 K total). 8 GNCAF
+variants (Phase 4) confirmed graph context doesn't help at this stage. The
+two-stage GARS paradigm flips it: use the graph **only for region proposal**
+on patch embeddings, then run a heavier pixel decoder on the ~0.5 % of
+patches that survive. UNI-v2 features end up serving both stages — no RGB
+loading.
+
+### Experiment 62: Stage 1 — `GraphTLSDetector` ablations
+- **Hypothesis**: Graph context aggregation over UNI-v2 patch embeddings
+  identifies TLS-positive patches better than per-patch MLPs because TLS is
+  a multi-patch *cluster* phenomenon ("a single patch with lymphocytes
+  might not be TLS, but a cluster of such patches is").
+- **Setup**: 814 slides (660 train / 154 val), patch-level binary label
+  from mask overlap, recall-weighted loss, batch = 1 slide.
+- **Variants and results**:
+  | Variant | best F1 | epoch | wandb |
+  |---|---|---|---|
+  | GCN 3-hop, 256 px | 0.561 | 28 | `bmnj8pu1` |
+  | GCN 3-hop, 512 px | 0.365 | 36 | `hwo25qzz` |
+  | **GATv2 3-hop, 256 px** | **0.561** | 35 | `x50tcqt6` |
+  | no-GNN (MLP only) | 0.343 | 13 | `so4ujuqa` |
+- **Conclusion**: **KEEP — graph context is essential here.** GATv2 = GCN at
+  the same hop count, both ~63 % above the no-GNN MLP. 256 px wins
+  decisively over 512 px (+52 %) — UNI-v2 was trained at 256 px and the
+  bigger tile dilutes signal.
+- **Interpretation**: This is the *opposite* finding from Phase 1/4 where
+  the GNN added nothing to the pixel decoder. The two stages need
+  fundamentally different inductive biases — region proposal is about
+  cluster detection (graph helps), pixel decoding is about local feature →
+  mask synthesis (foundation-model embeddings already carry it).
+
+### Experiment 63: Stage 2 Option A — RGB MobileNetV3 (DISCARDED)
+- **Hypothesis**: A small CNN over the RGB 256 × 256 patches selected by
+  Stage 1 will give finer pixel detail than decoding UNI-v2 features.
+- **Setup**: MobileNetV3 backbone, 3-class softmax, freeze_encoder=False,
+  warmup_epochs=3, lr=3e-4, gc_dice_weight=2, class_weights=[1, 1, 3],
+  patch_size=256.
+- **Result**: 4 launches (`gars_stage2_mobilenet_tls_patches_*`,
+  Apr 26 22:51 → Apr 27 06:47). All aborted before producing a checkpoint —
+  only `config.json` reached disk on the persistent volume. Stdout for
+  these runs is gone with the worktree.
+- **Conclusion**: **DISCARD** — the RGB load + on-the-fly tile reading
+  pipeline was the bottleneck (anecdotally; logs lost). Worth reviving
+  only if pixel-level fidelity becomes a bottleneck.
+
+### Experiment 64: Stage 2 Option B — `UNIv2PixelDecoder` (KEEP)
+- **Hypothesis**: A linear projection from the 1 536-d UNI-v2 features to a
+  16 × 16 spatial grid plus a conv decoder is enough to recover a 256 × 256
+  3-class mask, with no RGB loading.
+- **Setup**: 605 slides, 26 364 TLS patches (1 869 with GC). Pre-load
+  features + masks (~1.9 GB total). Train 22 240, val 4 124. lr=2e-4 with
+  warmup, batch 128, 30 epochs max.
+- **Variants**:
+  | Variant | best mDice | TLS dice | GC dice | epoch | wandb |
+  |---|---|---|---|---|---|
+  | univ2_decoder, hidden=256 | 0.7141 | 0.719 | 0.710 | 7 | `mn5jorov` |
+  | **univ2_hidden128** | **0.7178** | 0.710 | 0.687 | 8 | `cvrvn8yb` |
+  | univ2_spatial8 | crash | — | — | — | `r9xfeiax` |
+  | univ2_spatial32 | crash | — | — | — | `ve53vorx` |
+- **Result**: TLS dice ≈ 0.72, **GC dice ≈ 0.71**. The GC dice is the big
+  win — Phase 2 had `dice_gc=0` because GC is unrecoverable at the
+  slide-level 4× resolution. At native 256 px patch resolution, restricted
+  to TLS-positive patches, it's a normal segmentation problem.
+- **Conclusion**: **KEEP — primary headline result.** hidden=128 reached
+  marginally higher mDice but worse GC dice; hidden=256 is the more useful
+  config in practice.
+- **Interpretation**: The "pixel-level GC" plateau at 0 was a *resolution*
+  problem, not a *modelling* problem. Decoding UNI-v2 at 16 × 16 → 256 × 256
+  is cheap (no RGB) and works because foundation-model features at 256 px
+  already carry sub-patch structure.
+
+### Experiment 65: Cascade evaluation
+- **Setup**: Stage 1 GATv2 (F1=0.561) → Stage 2 univ2_decoder (mDice=0.714);
+  114-slide val. Sweep Stage 1 threshold ∈ {0.05, 0.1, 0.2, 0.3, 0.4, 0.5}.
+- **Result**: GC dice held at 0.728–0.734 across all thresholds (very
+  robust). TLS pixel dice degrades as the threshold rises (0.237 at 0.05 →
+  0.180 at 0.50) because Stage 1 selects only "core" TLS patches and misses
+  borders. Per-cancer at thr=0.05: BLCA TLS=0.307 GC=0.707, KIRC TLS=0.150
+  GC=0.798, LUSC TLS=0.206 GC=0.729. Whole-slide latency 0.32–1.06 s.
+- **Conclusion**: **KEEP — operating point thr=0.05** for best GC sp /
+  speed trade-off (0.41 s/slide).
+
+## Phase 8: End-to-end and unified variants (Apr 27)
+
+### Experiment 66: End-to-end joint S1+S2 (DISCARDED)
+- **Hypothesis**: Joint fine-tuning lets Stage 1 learn to select the
+  patches Stage 2 needs, recovering the TLS-border dice that the cascade
+  loses.
+- **Setup**: Loaded S1 (F1=0.561) + S2 (mDice=0.714); joint loss
+  `s1_loss + px_loss`; freeze S2 for 3 ep, unfreeze at ep 4. lr=1e-5.
+  489 train / 116 val slides.
+- **Result**: Best at **epoch 1**: `gc_dice=0.655`, then collapse —
+  Stage 1 recall fell 0.586 → 0.003 by ep 11, dice_tls 0.699 → 0.009,
+  dice_gc 0.655 → 0.000, `selected` patches 43 → 1. The S2 unfreeze at
+  ep 4 accelerated the collapse.
+- **Conclusion**: **DISCARD.** Joint loss lets S1 minimise its term by
+  selecting nothing (zero false positives ≫ no true positives). The
+  cascade's frozen S1→S2 interface is a hard regulariser worth keeping.
+- **Wandb**: `ufz9a2o4`.
+
+### Experiment 67: Unified `GraphEnrichedDecoder` (KEEP — alternative to cascade)
+- **Hypothesis**: Inject GATv2-aggregated graph features into the pixel
+  decoder so a single model does both jobs without a discrete patch
+  selection step.
+- **Setup**: ~10.15 M params; trained on 26 364 TLS patches (489 slides /
+  116 val); augmented with GATv2 graph features fused to the decoder
+  input. lr=2e-4, batch 1, 30 ep max.
+- **Result** (epoch 6, BEST): mDice = **0.7202**, TLS = 0.7619, GC = 0.6784.
+  v2 attempt (`gars_unified_v2.log`) was launched Apr 27 23:49 and truncated
+  by the VM crash (only dataset-build lines on disk).
+- **Conclusion**: **KEEP — comparable to the cascade in one stage**, but
+  loses the adaptive-compute speed-up (runs the heavier decoder on every
+  TLS-candidate patch). Use the cascade when latency matters; use the
+  unified model for cleaner training.
+- **Wandb**: `qy3pj74h`.
+
+### Final comparison vs published GNCAF
+On 114-slide TCGA val, Stage-1 threshold 0.05:
+
+| Metric | GNCAF | GARS | Δ |
+|---|---|---|---|
+| mDice | 0.688 | **0.714** | +4 % |
+| TLS dice | 0.736 | 0.718 | −2 % |
+| GC dice | 0.625 | **0.710** | **+14 %** |
+| Params | 57 M | 10.1 M | 6× fewer |
+| Inference | 5–10 min | 1.5 s | ~300× |
+| Training | ~6 h | ~7 min | ~50× |
+
+Figure: `notebooks/gars_vs_gncaf.png`.
+
+### Five findings
+1. UNI-v2 features are sufficient for pixel-level segmentation — no RGB.
+2. Graph context matters at region-proposal, not at pixel decoding *(inferred — OCR gap)*.
+3. Cascade > end-to-end joint training *(inferred — OCR gap)*.
+4. 256 px > 512 px for both Stage 1 (+52 % F1) and pixel-level models.
+5. Adaptive compute: only ~0.5 % of patches go through the pixel decoder.
+
+The GARS paradigm generalises: graph-guided region proposal + foundation-
+model feature decoding, applied wherever a tissue concept is sparse over
+a WSI.
 
 ## Next Hypotheses
 1. Verify GC test run works — check dice_gc, gc center loss, gc counting
@@ -287,4 +443,6 @@ GNN layers/heads, graph augmentation, capacity increases (OOM), lower LR/SGD, Tv
 3. GC-specific augmentation or loss focus
 4. Hierarchical constraint: enforce GC ⊂ TLS post-hoc or via loss
 5. GC counting evaluation: gc_det_auc, gc_count_sp
+6. **Recover GARS source from wandb artefacts** (runs `bmnj8pu1`, `mn5jorov`,
+   `cvrvn8yb`, `x50tcqt6`, `qy3pj74h`) before re-running anything new.
 

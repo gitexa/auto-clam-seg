@@ -1,0 +1,27 @@
+
+Run: gars_stage2_gars_stage2_univ2_decoder_20260427_102326
+Results: /home/ubuntu/ahaas-persistent-std-tcga/experiments/gars_stage2_gars_stage2_univ2_decoder_20260427_102326
+Train: 22240 patches, Val: 4124 patches
+Batches/epoch: 174 train, 33 val
+
+EPOCH epoch=1 train_loss=3.1054 val_loss=2.7162 val_mDice=0.6759 val_tls=0.6875 val_gc=0.6643 lr=2.00e-04 train=19s val=8s BEST
+EPOCH epoch=2 train_loss=2.8629 val_loss=2.5843 val_mDice=0.6714 val_tls=0.6765 val_gc=0.6662 lr=3.00e-04 train=18s val=8s
+EPOCH epoch=3 train_loss=2.6443 val_loss=2.3917 val_mDice=0.7108 val_tls=0.7204 val_gc=0.7013 lr=3.00e-04 train=18s val=8s BEST
+EPOCH epoch=4 train_loss=2.3958 val_loss=2.2527 val_mDice=0.7132 val_tls=0.7207 val_gc=0.7057 lr=3.00e-04 train=18s val=8s BEST
+EPOCH epoch=5 train_loss=2.1449 val_loss=2.0939 val_mDice=0.6942 val_tls=0.7118 val_gc=0.6766 lr=2.99e-04 train=18s val=8s
+EPOCH epoch=6 train_loss=1.9314 val_loss=1.9973 val_mDice=0.7122 val_tls=0.7242 val_gc=0.7003 lr=2.97e-04 train=18s val=8s
+EPOCH epoch=7 train_loss=1.7533 val_loss=1.9596 val_mDice=0.7141 val_tls=0.7182 val_gc=0.7101 lr=2.95e-04 train=18s val=8s BEST
+EPOCH epoch=8 train_loss=1.6267 val_loss=2.0256 val_mDice=0.6952 val_tls=0.7209 val_gc=0.6695 lr=2.92e-04 train=18s val=8s
+EPOCH epoch=9 train_loss=1.5336 val_loss=1.8921 val_mDice=0.7101 val_tls=0.7202 val_gc=0.7000 lr=2.88e-04 train=18s val=8s
+EPOCH epoch=10 train_loss=1.4896 val_loss=1.9183 val_mDice=0.7012 val_tls=0.7274 val_gc=0.6751 lr=2.84e-04 train=18s val=8s
+EPOCH epoch=11 train_loss=1.4303 val_loss=1.8654 val_mDice=0.7140 val_tls=0.7254 val_gc=0.7025 lr=2.79e-04 train=18s val=8s
+EPOCH epoch=12 train_loss=1.3737 val_loss=1.8149 val_mDice=0.7086 val_tls=0.7171 val_gc=0.7001 lr=2.74e-04 train=18s val=8s
+EPOCH epoch=13 train_loss=1.3454 val_loss=1.9378 val_mDice=0.7044 val_tls=0.7150 val_gc=0.6938 lr=2.68e-04 train=18s val=8s
+EPOCH epoch=14 train_loss=1.3070 val_loss=2.0918 val_mDice=0.6918 val_tls=0.7226 val_gc=0.6610 lr=2.61e-04 train=18s val=8s
+EPOCH epoch=15 train_loss=1.2724 val_loss=1.9137 val_mDice=0.7100 val_tls=0.7101 val_gc=0.7098 lr=2.54e-04 train=19s val=8s
+EPOCH epoch=16 train_loss=1.2558 val_loss=1.8767 val_mDice=0.7043 val_tls=0.6924 val_gc=0.7161 lr=2.47e-04 train=18s val=8s
+EPOCH epoch=17 train_loss=1.2207 val_loss=2.0203 val_mDice=0.6937 val_tls=0.7149 val_gc=0.6724 lr=2.39e-04 train=18s val=8s
+  Early stopping at epoch 17 (best=7, mDice=0.7141)
+
+Done. Best mDice=0.7141 at epoch 7
+Checkpoint: /home/ubuntu/ahaas-persistent-std-tcga/experiments/gars_stage2_gars_stage2_univ2_decoder_20260427_102326/best_checkpoint.pt

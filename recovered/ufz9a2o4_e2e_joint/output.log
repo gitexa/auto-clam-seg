@@ -1,0 +1,20 @@
+
+Run: gars_e2e_gars_e2e_joint_20260427_143153
+Train: 489 slides, Val: 116 slides
+
+EPOCH epoch=1 train_loss=0.4071 s1_loss=0.0261 px_loss=0.7619 s1_f1=0.702 s1_recall=0.586 dice_tls=0.6989 dice_gc=0.6550 selected=43 lr=9.98e-06 train=118s val=34s BEST
+EPOCH epoch=2 train_loss=0.2971 s1_loss=0.0582 px_loss=0.4779 s1_f1=0.226 s1_recall=0.128 dice_tls=0.3451 dice_gc=0.4487 selected=13 lr=9.90e-06 train=109s val=27s
+EPOCH epoch=3 train_loss=0.1983 s1_loss=0.0782 px_loss=0.2403 s1_f1=0.053 s1_recall=0.027 dice_tls=0.1365 dice_gc=0.4043 selected=4 lr=9.78e-06 train=100s val=25s
+  Unfreezing Stage 2 at epoch 4
+EPOCH epoch=4 train_loss=0.1356 s1_loss=0.0776 px_loss=0.1159 s1_f1=0.027 s1_recall=0.013 dice_tls=0.0858 dice_gc=0.2812 selected=3 lr=9.61e-06 train=103s val=26s
+EPOCH epoch=5 train_loss=0.1210 s1_loss=0.0705 px_loss=0.1009 s1_f1=0.015 s1_recall=0.008 dice_tls=0.0578 dice_gc=0.1847 selected=3 lr=9.40e-06 train=99s val=25s
+EPOCH epoch=6 train_loss=0.1054 s1_loss=0.0661 px_loss=0.0785 s1_f1=0.010 s1_recall=0.005 dice_tls=0.0418 dice_gc=0.1286 selected=2 lr=9.14e-06 train=99s val=24s
+EPOCH epoch=7 train_loss=0.1004 s1_loss=0.0628 px_loss=0.0753 s1_f1=0.007 s1_recall=0.004 dice_tls=0.0256 dice_gc=0.0535 selected=1 lr=8.84e-06 train=100s val=27s
+EPOCH epoch=8 train_loss=0.0955 s1_loss=0.0626 px_loss=0.0657 s1_f1=0.007 s1_recall=0.003 dice_tls=0.0159 dice_gc=0.0230 selected=1 lr=8.51e-06 train=98s val=27s
+EPOCH epoch=9 train_loss=0.0904 s1_loss=0.0601 px_loss=0.0605 s1_f1=0.006 s1_recall=0.003 dice_tls=0.0133 dice_gc=0.0214 selected=1 lr=8.15e-06 train=99s val=29s
+EPOCH epoch=10 train_loss=0.0904 s1_loss=0.0599 px_loss=0.0611 s1_f1=0.006 s1_recall=0.003 dice_tls=0.0112 dice_gc=0.0000 selected=1 lr=7.75e-06 train=99s val=27s
+EPOCH epoch=11 train_loss=0.0894 s1_loss=0.0597 px_loss=0.0593 s1_f1=0.005 s1_recall=0.002 dice_tls=0.0092 dice_gc=0.0000 selected=1 lr=7.33e-06 train=99s val=24s
+  Early stopping at epoch 11 (best=1, gc_dice=0.6550)
+
+Done. Best GC dice=0.6550 at epoch 1
+Checkpoint: /home/ubuntu/ahaas-persistent-std-tcga/experiments/gars_e2e_gars_e2e_joint_20260427_143153/best_checkpoint.pt

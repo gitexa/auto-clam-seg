@@ -1,0 +1,13 @@
+_runtime: 534
+_step: 17
+_timestamp: 1777292069.4768872
+_wandb: {'runtime': 534}
+best_epoch: 8
+best_mDice: 0.717764744535546
+epoch: 18
+lr: 0.00023071235297450588
+train/loss: 1.201055271187048
+val/dice_gc: 0.6871766497221045
+val/dice_tls: 0.7097252499009715
+val/loss: 1.9271111687024431
+val/mDice: 0.698450949811538
