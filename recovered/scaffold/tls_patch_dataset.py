@@ -102,12 +102,16 @@ def patient_id_from_slide(slide_id: str) -> str:
 # ─── Per-slide patch extraction (worker) ───────────────────────────────
 
 
-def _process_one_slide(args: tuple[dict, str]) -> dict[str, Any] | None:
+def _process_one_slide(args: tuple[dict, str, int]) -> dict[str, Any] | None:
     """Worker: open one slide's zarr + mask, return TLS-positive patches.
 
     Each TLS-positive patch contributes one (feature, 256×256 mask tile).
+    A patch is "TLS-positive" if its native-resolution mask tile has
+    > min_tls_pixels foreground (TLS or GC) pixels. Default 1 = any
+    pixel (matches recovered build); bigger thresholds tighten the
+    label and reduce dataset size.
     """
-    entry, local_mask_dir = args
+    entry, local_mask_dir, min_tls_pixels = args
     if entry["mask_path"] is None:
         return None
     short_id = entry["slide_id"].split(".")[0]
@@ -149,7 +153,7 @@ def _process_one_slide(args: tuple[dict, str]) -> dict[str, Any] | None:
         if x1 <= x or y1 <= y:
             continue
         tile = np.asarray(z0[y:y1, x:x1])  # windowed read
-        if tile.max() == 0:
+        if int((tile > 0).sum()) < min_tls_pixels:
             continue
         if tile.shape != (PATCH_SIZE, PATCH_SIZE):
             t = torch.from_numpy(tile.astype(np.uint8)).unsqueeze(0).unsqueeze(0).float()
@@ -184,6 +188,7 @@ def build_tls_patch_dataset(
     skip_test_patients: bool = True,
     rebuild: bool = False,
     verbose: bool = True,
+    min_tls_pixels: int = 1,
 ) -> dict[str, torch.Tensor | list]:
     """Build (or load from cache) the in-memory TLS-patch dataset.
 
@@ -217,7 +222,10 @@ def build_tls_patch_dataset(
     if verbose:
         print(f"  {len(entries)} slides with both mask and features")
 
-    args_list = [(e, local_mask_dir) for e in entries]
+    args_list = [(e, local_mask_dir, min_tls_pixels) for e in entries]
+    if verbose and min_tls_pixels > 1:
+        print(f"  min_tls_pixels={min_tls_pixels} "
+              f"({100 * min_tls_pixels / (PATCH_SIZE * PATCH_SIZE):.2f}% coverage threshold)")
     results: list[dict[str, Any]] = []
     n_done = 0
     n_total_patches = 0
@@ -275,7 +283,18 @@ def build_tls_patch_dataset(
 
 
 if __name__ == "__main__":
-    # Run once to build the cache.
-    bundle = build_tls_patch_dataset()
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--min_tls_pixels", type=int, default=1,
+                    help="Patch is kept if mask>0 pixel count >= this. "
+                         "Higher = tighter label, fewer training patches.")
+    ap.add_argument("--cache_path", default=DEFAULT_CACHE_PATH)
+    ap.add_argument("--rebuild", action="store_true")
+    args = ap.parse_args()
+    bundle = build_tls_patch_dataset(
+        cache_path=args.cache_path,
+        min_tls_pixels=args.min_tls_pixels,
+        rebuild=args.rebuild,
+    )
     print(f"\nDone. features={tuple(bundle['features'].shape)} "
           f"masks={tuple(bundle['masks'].shape)}")

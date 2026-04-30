@@ -168,6 +168,16 @@ discard (`git reset --hard HEAD~1`).
   TLS=5; further increases destabilize without adding signal. Sweet
   spot located.
 
+### v3.3f — v3.3d + warmup_epochs=5 (DISCARD)
+
+- **Hypothesis**: Longer warmup may stabilise the GC-collapse-and-
+  recover pattern in ep1-2.
+- **Config**: v3.3d (`class_weights=[1,5,3]`) + `train.warmup_epochs=5`.
+- **Result**: best mDice=0.7187 ep8, early-stopped ep18.
+  Run `kj81fx5a`.
+- **Conclusion**: DISCARD. **−0.005 vs v3.3d**. Default warmup=3 is
+  the sweet spot.
+
 ---
 
 ## Next hypotheses (v3.3+)
