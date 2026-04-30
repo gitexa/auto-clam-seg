@@ -158,6 +158,16 @@ discard (`git reset --hard HEAD~1`).
   v3.1**. TLS gains outweighed the small GC drop. Trend monotonic so
   far ([1,1,3]→[1,3,3]→[1,5,3] each gave a step up). Continue.
 
+### v3.3e — h=128 + class_weights=[1,7,3] (DISCARD)
+
+- **Hypothesis**: Continue the monotonic trend, push TLS to 7.
+- **Config**: `model=univ2_decoder_h128 train.class_weights=[1,7,3]`.
+- **Result**: best mDice=0.7060 at ep9, early-stopped ep19. TLS dice
+  0.586 (~same as v3.3d), GC dice 0.897 (~same). Run `oq8wo258`.
+- **Conclusion**: DISCARD. **−0.018 vs v3.3d**. Peak class-weight is
+  TLS=5; further increases destabilize without adding signal. Sweet
+  spot located.
+
 ---
 
 ## Next hypotheses (v3.3+)
