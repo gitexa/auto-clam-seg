@@ -46,7 +46,33 @@ from torch.optim import AdamW
 from torch_geometric.nn import GATv2Conv
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from train_gars_stage2 import compute_loss, per_class_dice  # reuse
+from train_gars_stage2 import compute_loss  # reuse
+
+
+def per_class_dice_batch(
+    logits: torch.Tensor,    # (B, C, H, W)
+    targets: torch.Tensor,   # (B, H, W) int
+    n_classes: int = 3,
+    eps: float = 1e-6,
+) -> list[float]:
+    """Per-class dice aggregated across the *whole batch* before division.
+
+    Stage 2's `per_class_dice` averages per-patch dices, which gives
+    spurious 1.0 for patches that contain no pixels of class c. That's
+    fine for Stage 2 (only TLS-positive patches in val) but breaks
+    end-to-end where val has many bg-only patches. Aggregating
+    intersections + unions across the whole batch first is the
+    standard slide-level / batch-level dice.
+    """
+    pred = logits.argmax(dim=1)  # (B, H, W)
+    dices: list[float] = []
+    for c in range(n_classes):
+        p = (pred == c).float()
+        t = (targets == c).float()
+        inter = float((p * t).sum())
+        denom = float(p.sum() + t.sum())
+        dices.append((2 * inter + eps) / (denom + eps) if denom > 0 else 0.0)
+    return dices
 
 
 def make_dec_block(in_ch: int, out_ch: int) -> nn.Sequential:
@@ -201,26 +227,35 @@ def run_one_slide(
     cfg_train,
     train: bool,
     rng: np.random.Generator,
+    patch_mask_lookup: dict,    # {slide_short: {patch_idx: native_mask_tensor}}
 ) -> dict:
     """One slide: graph forward (all patches) → sample patches → decode.
 
-    Patch sampling per slide: keep all TLS-positive patches + bg_decode_ratio
-    of bg patches, capped at max_patches_per_slide.
+    Patch sampling: keep all TLS-positive patches (those in
+    `patch_mask_lookup`) + bg_decode_ratio of bg patches (with all-zero
+    masks), capped at max_patches_per_slide.
+
+    Per-patch mask supervision is **native 256×256** from the
+    `tls_patch_dataset` cache — NOT upsampled from the cached low-res
+    slide mask. The earlier upsample-from-low-res version produced
+    spurious mDice ≈ 0.99 because the supervision was degenerate (only
+    16 unique pixels per patch).
     """
     features = batch["features"].to(device, non_blocking=True)         # (N, 1536)
-    coords = batch["coords"]                                            # (N, 2)
     edge_index = batch["edge_index"].to(device, non_blocking=True)
-    mask_full = batch["mask"]                                           # (1, H, W)
+    slide_id = batch["slide_id"]
+    short_id = slide_id.split(".")[0]
+    patch_to_mask = patch_mask_lookup.get(short_id, {})
 
     n = features.shape[0]
-    # Graph forward over ALL patches (always — graph context needs full neighbourhood).
+    # Graph forward over ALL patches.
     graph_feat = model.graph_context(features, edge_index)              # (N, graph_dim)
 
-    # Per-patch binary label (TLS-positive vs bg).
-    labels_bool = patch_labels(mask_full, coords,
-                               cfg_train.patch_size, cfg_train.upsample_factor)
-    pos_idx = torch.where(labels_bool)[0].tolist()
-    neg_idx = torch.where(~labels_bool)[0].tolist()
+    # Pos/neg indices: a patch is "TLS-positive" iff it has a native
+    # 256×256 mask tile in the cache (built with min_tls_pixels filter).
+    pos_idx = [i for i in range(n) if i in patch_to_mask]
+    pos_set = set(pos_idx)
+    neg_idx = [i for i in range(n) if i not in pos_set]
     rng.shuffle(neg_idx)
     n_neg_keep = int(cfg_train.bg_decode_ratio * len(neg_idx))
     selected = pos_idx + neg_idx[:n_neg_keep]
@@ -228,32 +263,17 @@ def run_one_slide(
     if len(selected) > cfg_train.max_patches_per_slide:
         selected = selected[: cfg_train.max_patches_per_slide]
     if not selected:
-        return None  # slide has no TLS patches and bg_decode_ratio=0; skip
+        return None
 
-    # Build per-patch supervision (256x256 mask tile per selected patch).
-    # Use the existing per-patch cache built by tls_patch_dataset for the
-    # mask tiles, OR derive on the fly from the upsampled mask cache.
-    upsampled = mask_full[0]                                            # (H, W) values 0/1/2
-    grid_x = (coords[:, 0] / cfg_train.patch_size).long()
-    grid_y = (coords[:, 1] / cfg_train.patch_size).long()
-    grid_x -= grid_x.min(); grid_y -= grid_y.min()
-    u = cfg_train.upsample_factor
-
-    # Stitch per-patch masks at upsampled resolution.
-    # Each patch covers a u × u cell of the upsampled mask. We need a 256×256
-    # mask per patch — upsample the u×u cell to 256×256 via nearest-neighbour.
     patch_masks: list[torch.Tensor] = []
     patch_feats: list[torch.Tensor] = []
     patch_graphs: list[torch.Tensor] = []
     for i in selected:
-        gx, gy = int(grid_x[i]), int(grid_y[i])
-        cell = upsampled[gy * u : (gy + 1) * u, gx * u : (gx + 1) * u]   # (u, u)
-        if cell.shape != (u, u):
-            continue
-        # Nearest-neighbour upsample u×u → 256×256.
-        m = cell.long().unsqueeze(0).unsqueeze(0).float()
-        m = F.interpolate(m, size=(256, 256), mode="nearest").squeeze().long()
-        patch_masks.append(m)
+        if i in patch_to_mask:
+            m = patch_to_mask[i]                                        # (256, 256) uint8
+        else:
+            m = torch.zeros(256, 256, dtype=torch.uint8)
+        patch_masks.append(m.long())
         patch_feats.append(features[i])
         patch_graphs.append(graph_feat[i])
 
@@ -284,7 +304,7 @@ def run_one_slide(
             accumulated_loss = weighted if accumulated_loss is None else accumulated_loss + weighted
         total_loss_val += float(loss.detach()) * f.shape[0]
         n_dec += f.shape[0]
-        d = per_class_dice(logits.detach(), y)
+        d = per_class_dice_batch(logits.detach(), y)
         for j in range(3):
             sums[j] += d[j] * f.shape[0]
     if train and accumulated_loss is not None:
@@ -350,6 +370,25 @@ def main(cfg: DictConfig) -> None:
     print("Building mask cache...")
     mask_dict = ps.build_mask_cache(train_entries + val_entries, cfg.train.upsample_factor)
 
+    # Per-patch native-resolution masks (for supervision).
+    print("Loading TLS-patch cache for native-resolution supervision...")
+    from tls_patch_dataset import build_tls_patch_dataset
+    patch_cache_path = cfg.train.get(
+        "patch_cache_path",
+        "/home/ubuntu/local_data/tls_patch_dataset_min4096.pt",
+    )
+    bundle = build_tls_patch_dataset(cache_path=patch_cache_path)
+    # Build {slide_short_id: {patch_idx: 256×256 mask tensor}} lookup.
+    patch_mask_lookup: dict[str, dict[int, torch.Tensor]] = {}
+    bundle_masks = bundle["masks"]  # (N, 256, 256) uint8
+    for ci, sid in enumerate(bundle["slide_ids"]):
+        short = sid.split(".")[0]
+        pi = int(bundle["patch_idx"][ci])
+        patch_mask_lookup.setdefault(short, {})[pi] = bundle_masks[ci]
+    n_slides_with_pos = len(patch_mask_lookup)
+    n_total_pos = sum(len(d) for d in patch_mask_lookup.values())
+    print(f"  patch_mask_lookup: {n_slides_with_pos} slides, {n_total_pos} TLS-pos patches")
+
     train_ds = ps.TLSSegmentationDataset(
         train_entries, mask_dict, cfg.train.upsample_factor, patch_size=cfg.train.patch_size,
     )
@@ -405,7 +444,8 @@ def main(cfg: DictConfig) -> None:
         for idx in range(len(train_ds)):
             optimizer.zero_grad()
             r = run_one_slide(model, train_ds[idx], device, cw, cfg.train,
-                              train=True, rng=rng)
+                              train=True, rng=rng,
+                              patch_mask_lookup=patch_mask_lookup)
             if r is None:
                 continue
             optimizer.step()
@@ -429,7 +469,8 @@ def main(cfg: DictConfig) -> None:
         with torch.no_grad():
             for idx in range(len(val_ds)):
                 r = run_one_slide(model, val_ds[idx], device, cw, cfg.train,
-                                  train=False, rng=rng)
+                                  train=False, rng=rng,
+                                  patch_mask_lookup=patch_mask_lookup)
                 if r is None:
                     continue
                 loss_sum += r["loss"] * r["n_decoded"]

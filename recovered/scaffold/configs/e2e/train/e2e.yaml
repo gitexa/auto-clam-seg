@@ -13,3 +13,5 @@ max_patches_per_slide: 200           # cap per slide (positives + bg subsample)
 val_frac: 0.157
 upsample_factor: 4
 patch_size: 256
+# native-resolution per-patch supervision (overrides the slide-level upsampled mask)
+patch_cache_path: /home/ubuntu/local_data/tls_patch_dataset_min4096.pt
