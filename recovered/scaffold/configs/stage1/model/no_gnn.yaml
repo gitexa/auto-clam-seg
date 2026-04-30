@@ -1,0 +1,9 @@
+# @package model
+# Stage 1 — MLP-only ablation (n_hops=0).
+# Verified strict-load against checkpoint so4ujuqa (427,009 params).
+gnn_type: gcn
+n_hops: 0
+hidden_dim: 256
+dropout: 0.1
+gat_heads: 4   # unused
+in_dim: 1536

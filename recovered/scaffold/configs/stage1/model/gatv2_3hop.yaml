@@ -1,0 +1,9 @@
+# @package model
+# Stage 1 — GraphTLSDetector with GATv2 3-hop attention.
+# Verified strict-load against checkpoint x50tcqt6 (824,833 params).
+gnn_type: gatv2
+n_hops: 3
+hidden_dim: 256
+dropout: 0.1
+gat_heads: 4
+in_dim: 1536

@@ -1,0 +1,26 @@
+# Cascade evaluation config.
+# Required overrides: stage1=<path>, stage2=<path>
+stage: cascade
+label: v3.2_thr_sweep
+seed: 42
+out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
+
+stage1: ???    # path to Stage 1 best_checkpoint.pt (REQUIRED)
+stage2: ???    # path to Stage 2 best_checkpoint.pt (REQUIRED)
+
+thresholds: [0.05, 0.10, 0.20, 0.30, 0.40, 0.50]
+upsample_factor: 4
+s2_batch: 64
+
+wandb:
+  enabled: true
+  project: tls-pixel-seg
+  entity: null
+  mode: ${oc.env:WANDB_MODE,online}
+  tags: [v3, gars, cascade]
+
+hydra:
+  run:
+    dir: ${out_root}/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+  job:
+    chdir: false

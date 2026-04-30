@@ -1,29 +1,27 @@
 """GARS Stage 1: GraphTLSDetector — patch-level TLS region proposal.
 
-Scaffolded on 2026-04-29 from the recovered wandb config + log of run
-`x50tcqt6` (gars_stage1_gatv2_3hop_v2_20260426_230650). Architecture
-shapes match the surviving `best_checkpoint.pt` exactly (verified by
-loading state_dict with strict=True; see verify_stage1_ckpt.py).
+v3.0 — hydra config + wandb logging + config dump to results dir.
 
-Source code for the original training script was lost with the VM; this
-is a re-implementation of the same model and training loop.
+Architecture (verified strict-load against recovered checkpoints):
+    proj:        Linear(1536 -> hidden_dim) + LayerNorm
+    gnn_layers:  n_hops × {GATv2Conv | GCNConv}        (residual + post-norm)
+    gnn_norms:   n_hops × LayerNorm
+    head:        Linear(hidden_dim, 128) → GELU → Dropout → Linear(128, 1)
 
 Inputs per slide (via prepare_segmentation.TLSSegmentationDataset):
-  features:          (N, 1536)  UNI-v2 patch embeddings
-  coords:            (N, 2)     patch top-left (x, y) at slide native px
-  graph_edges_1hop:  (2, E)     pre-computed 1-hop spatial edges (from zarr)
-  mask:              (1, H, W)  3-class HookNet mask (0=bg, 1=TLS, 2=GC),
-                                upsampled to upsample_factor × patch grid
-
-Patch label: 1 if the patch's cell in the mask grid contains any positive
-(TLS or GC) pixels; else 0.
+    features:          (N, 1536)  UNI-v2 embeddings
+    coords:            (N, 2)     patch top-left (x, y), slide native px
+    graph_edges_1hop:  (2, E)     pre-computed 1-hop spatial edges
+    mask:              (1, H, W)  3-class HookNet mask
 
 Run:
-    python train_gars_stage1.py  # config from CLI / env / hardcoded below
+    python train_gars_stage1.py                          # default config
+    python train_gars_stage1.py model=gcn_3hop           # ablation
+    python train_gars_stage1.py train.lr=5e-4 epochs=20  # tweak
+    WANDB_MODE=disabled python train_gars_stage1.py epochs=1 label=smoke
 """
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import sys
@@ -31,10 +29,12 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import hydra
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from omegaconf import DictConfig, OmegaConf
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch_geometric.nn import GATv2Conv, GCNConv
@@ -44,18 +44,6 @@ from torch_geometric.nn import GATv2Conv, GCNConv
 
 
 class GraphTLSDetector(nn.Module):
-    """Per-patch binary TLS classifier with optional GNN context.
-
-    Architecture (verified against checkpoint x50tcqt6 / GATv2 3-hop):
-        proj:        Linear(1536 -> 256) + LayerNorm(256)
-        gnn_layers:  n_hops × {GATv2Conv(256, 64, heads=4, concat=True)
-                               | GCNConv(256, 256)}
-        gnn_norms:   n_hops × LayerNorm(256)
-        head:        Linear(256, 128) -> GELU -> Dropout(p) -> Linear(128, 1)
-
-    n_hops=0 disables the GNN entirely (only proj + head).
-    """
-
     def __init__(
         self,
         in_dim: int = 1536,
@@ -102,11 +90,11 @@ class GraphTLSDetector(nn.Module):
         x = self.proj(features)
         for layer, norm in zip(self.gnn_layers, self.gnn_norms):
             assert edge_index is not None, "GNN layers need an edge_index"
-            x = norm(layer(x, edge_index) + x)  # residual + post-norm
+            x = norm(layer(x, edge_index) + x)
         return self.head(x).squeeze(-1)
 
 
-# ─── Patch label generation ───────────────────────────────────────────
+# ─── Patch labelling ──────────────────────────────────────────────────
 
 
 def patch_labels_from_mask(
@@ -115,19 +103,11 @@ def patch_labels_from_mask(
     patch_size: int,
     upsample_factor: int,
 ) -> torch.Tensor:
-    """For each patch, label = 1 if any TLS (mask>0) pixel falls inside it.
-
-    mask: (1, H, W) values in {0, 1, 2} (bg / TLS / GC). H, W are the
-        upsampled grid (upsample_factor patches-per-dim per native patch).
-    coords: (N, 2) patch top-left in native pixels.
-    """
     grid_x = (coords[:, 0] / patch_size).long()
     grid_y = (coords[:, 1] / patch_size).long()
     grid_x -= grid_x.min()
     grid_y -= grid_y.min()
-    m = (mask[0] > 0).float()  # (H, W) — TLS or GC pixels
-
-    # Each patch covers an upsample_factor × upsample_factor cell in the mask
+    m = (mask[0] > 0).float()
     u = upsample_factor
     H, W = m.shape
     labels = torch.zeros(coords.shape[0], dtype=torch.float32)
@@ -139,7 +119,7 @@ def patch_labels_from_mask(
     return labels
 
 
-# ─── Training ─────────────────────────────────────────────────────────
+# ─── Metrics + loop ───────────────────────────────────────────────────
 
 
 def confusion_at_threshold(logits: torch.Tensor, target: torch.Tensor, thr: float = 0.5):
@@ -159,7 +139,8 @@ def f1_from_confusion(tp: int, fp: int, fn: int, tn: int):
     return rec, prec, f1
 
 
-def run_split(model, dataset, optimizer, criterion, device, train: bool, upsample_factor: int, patch_size: int):
+def run_split(model, dataset, optimizer, criterion, device, train: bool,
+              upsample_factor: int, patch_size: int):
     if train:
         model.train()
     else:
@@ -171,21 +152,19 @@ def run_split(model, dataset, optimizer, criterion, device, train: bool, upsampl
     with ctx:
         for idx in range(len(dataset)):
             batch = dataset[idx]
-            features = batch["features"].to(device)                  # (N, 1536)
-            coords = batch["coords"]                                  # (N, 2)
+            features = batch["features"].to(device)
+            coords = batch["coords"]
             edge_index = batch["edge_index"]
             edge_index = edge_index.to(device) if edge_index is not None else None
             target = patch_labels_from_mask(
                 batch["mask"], coords, patch_size, upsample_factor
             ).to(device)
-
             logits = model(features, edge_index)
             loss = criterion(logits, target)
             if train:
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-
             total_loss += float(loss.detach())
             n_batches += 1
             a, b, c, d = confusion_at_threshold(logits.detach(), target)
@@ -193,100 +172,115 @@ def run_split(model, dataset, optimizer, criterion, device, train: bool, upsampl
     rec, prec, f1 = f1_from_confusion(tp, fp, fn, tn)
     return {
         "loss": total_loss / max(1, n_batches),
-        "recall": rec,
-        "precision": prec,
-        "f1": f1,
+        "recall": rec, "precision": prec, "f1": f1,
         "tp": tp, "fp": fp, "fn": fn, "tn": tn,
         "n_selected": tp + fp,
         "n_total": tp + fp + fn + tn,
     }
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--epochs", type=int, default=50)
-    ap.add_argument("--n_hops", type=int, default=3)
-    ap.add_argument("--dropout", type=float, default=0.1)
-    ap.add_argument("--gnn_type", choices=["gatv2", "gcn"], default="gatv2")
-    ap.add_argument("--patience", type=int, default=10)
-    ap.add_argument("--hidden_dim", type=int, default=256)
-    ap.add_argument("--patch_size", type=int, default=256)  # data is at 256
-    ap.add_argument("--upsample_factor", type=int, default=4)
-    ap.add_argument("--pos_weight", type=float, default=5.0)
-    ap.add_argument("--weight_decay", type=float, default=1e-4)
-    ap.add_argument("--k_folds", type=int, default=1)
-    ap.add_argument("--data_fraction", type=float, default=1.0)
-    ap.add_argument("--label", default="gars_stage1_gatv2_3hop")
-    ap.add_argument("--out_root", default="/home/ubuntu/ahaas-persistent-std-tcga/experiments")
-    args = ap.parse_args()
+@hydra.main(version_base=None, config_path="configs/stage1", config_name="config")
+def main(cfg: DictConfig) -> None:
+    out_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Dump the resolved config at the top level of the run dir (hydra
+    # also writes .hydra/config.yaml automatically; this is the convenient
+    # discovery copy).
+    OmegaConf.save(cfg, out_dir / "config.yaml")
+    print(OmegaConf.to_yaml(cfg))
+    print(f"Output dir: {out_dir}")
+
+    # Late imports (need profile-clam venv).
     sys.path.insert(0, "/home/ubuntu/profile-clam")
-    import prepare_segmentation as ps  # local import — needs zarr / tifffile / scipy
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import prepare_segmentation as ps
+    from stage_features_to_local import LOCAL_ROOT, local_zarr_dirs
 
-    ps.set_seed(args.seed)
+    # Local SSD redirect.
+    if cfg.use_local_ssd != "never":
+        local_dirs = local_zarr_dirs()
+        all_present = all(Path(p).is_dir() and any(Path(p).iterdir())
+                          for p in local_dirs.values())
+        if all_present:
+            ps.ZARR_DIRS = local_dirs
+            print(f"Using locally-staged zarrs at {LOCAL_ROOT}")
+        elif cfg.use_local_ssd == "always":
+            raise RuntimeError(f"--use_local_ssd=always but local zarrs missing at {LOCAL_ROOT}")
+        else:
+            print(f"NFS zarrs in use (no local copy at {LOCAL_ROOT})")
+
+    ps.set_seed(cfg.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # ─ Build dataset ─
+    # ─ Data ─
     print("Building dataset...")
     entries = ps.build_slide_entries()
-    if args.data_fraction < 1.0:
-        entries = ps.subsample_entries(entries, args.data_fraction, args.seed)
-    splits = ps.create_splits(entries, k_folds=args.k_folds, seed=args.seed)
-    train_entries, val_entries = splits[0]["train"], splits[0]["val"]
+    if cfg.train.data_fraction < 1.0:
+        entries = ps.subsample_entries(entries, cfg.train.data_fraction, cfg.seed)
+    folds_pair, _test = ps.create_splits(entries, k_folds=cfg.train.k_folds, seed=cfg.seed)
+    val_entries, train_entries = folds_pair[0], folds_pair[1]
     print(f"Split: {len(train_entries)} train, {len(val_entries)} val")
 
     print("Building mask cache...")
-    mask_dict = ps.build_mask_cache(train_entries + val_entries, args.upsample_factor)
+    mask_dict = ps.build_mask_cache(train_entries + val_entries, cfg.train.upsample_factor)
 
     train_ds = ps.TLSSegmentationDataset(
-        train_entries, mask_dict, args.upsample_factor, patch_size=args.patch_size
+        train_entries, mask_dict, cfg.train.upsample_factor, patch_size=cfg.train.patch_size,
     )
     val_ds = ps.TLSSegmentationDataset(
-        val_entries, mask_dict, args.upsample_factor, patch_size=args.patch_size
+        val_entries, mask_dict, cfg.train.upsample_factor, patch_size=cfg.train.patch_size,
     )
 
     # ─ Model + opt ─
     model = GraphTLSDetector(
-        in_dim=1536,
-        hidden_dim=args.hidden_dim,
-        n_hops=args.n_hops,
-        gnn_type=args.gnn_type,
-        dropout=args.dropout,
+        in_dim=cfg.model.in_dim,
+        hidden_dim=cfg.model.hidden_dim,
+        n_hops=cfg.model.n_hops,
+        gnn_type=cfg.model.gnn_type,
+        dropout=cfg.model.dropout,
+        gat_heads=cfg.model.gat_heads,
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"Stage 1 ({args.gnn_type} {args.n_hops}-hop): {n_params:,} params")
+    print(f"Stage 1 ({cfg.model.gnn_type} {cfg.model.n_hops}-hop): {n_params:,} params")
 
-    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=0.0)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(args.pos_weight, device=device))
+    optimizer = AdamW(model.parameters(), lr=cfg.train.lr, weight_decay=cfg.train.weight_decay)
+    scheduler = CosineAnnealingLR(optimizer, T_max=cfg.train.epochs, eta_min=0.0)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(cfg.train.pos_weight, device=device))
 
-    # ─ Output dir ─
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_id = f"gars_stage1_{args.label}_{ts}"
-    out_dir = Path(args.out_root) / run_id
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "config.json").write_text(json.dumps(vars(args), indent=2))
-    print(f"Run: {run_id}\nResults: {out_dir}")
+    # ─ Wandb ─
+    run = None
+    if cfg.wandb.enabled and cfg.wandb.mode != "disabled":
+        import wandb
+        run = wandb.init(
+            project=cfg.wandb.project,
+            entity=cfg.wandb.entity,
+            name=out_dir.name,
+            config=OmegaConf.to_container(cfg, resolve=True),
+            dir=str(out_dir),
+            mode=cfg.wandb.mode,
+            tags=list(cfg.wandb.tags) if cfg.wandb.tags else None,
+        )
+
     print(f"Training {len(train_entries)} slides, validating {len(val_entries)} slides\n")
 
-    # ─ Loop ─
     best_f1 = -1.0
     best_epoch = -1
     epochs_since_best = 0
-    for epoch in range(1, args.epochs + 1):
+    last_va = None
+    for epoch in range(1, cfg.train.epochs + 1):
         t0 = time.time()
         tr = run_split(model, train_ds, optimizer, criterion, device, train=True,
-                       upsample_factor=args.upsample_factor, patch_size=args.patch_size)
+                       upsample_factor=cfg.train.upsample_factor, patch_size=cfg.train.patch_size)
         train_t = time.time() - t0
         t0 = time.time()
         va = run_split(model, val_ds, optimizer, criterion, device, train=False,
-                       upsample_factor=args.upsample_factor, patch_size=args.patch_size)
+                       upsample_factor=cfg.train.upsample_factor, patch_size=cfg.train.patch_size)
         val_t = time.time() - t0
         scheduler.step()
         lr = optimizer.param_groups[0]["lr"]
+        last_va = va
 
         is_best = va["f1"] > best_f1
         marker = "BEST" if is_best else ""
@@ -299,6 +293,17 @@ def main():
             f"val_selected={va['n_selected']}/{va['n_total']} "
             f"lr={lr:.2e} train={train_t:.0f}s val={val_t:.0f}s {marker}"
         )
+        if run is not None:
+            run.log({
+                "epoch": epoch, "lr": lr,
+                "train/loss": tr["loss"], "train/f1": tr["f1"],
+                "train/recall": tr["recall"], "train/precision": tr["precision"],
+                "val/loss": va["loss"], "val/f1": va["f1"],
+                "val/recall": va["recall"], "val/precision": va["precision"],
+                "val/n_selected": va["n_selected"], "val/n_total": va["n_total"],
+                "best_f1": max(best_f1, va["f1"]),
+            }, step=epoch)
+
         if is_best:
             best_f1, best_epoch = va["f1"], epoch
             epochs_since_best = 0
@@ -307,20 +312,24 @@ def main():
                     "model_state_dict": model.state_dict(),
                     "epoch": epoch,
                     "val_metrics": va,
-                    "config": vars(args),
+                    "config": OmegaConf.to_container(cfg, resolve=True),
                 },
                 out_dir / "best_checkpoint.pt",
             )
         else:
             epochs_since_best += 1
-            if epochs_since_best >= args.patience:
-                print(f"  Early stopping at epoch {epoch} "
-                      f"(best={best_epoch}, f1={best_f1:.3f})")
+            if epochs_since_best >= cfg.train.patience:
+                print(f"  Early stopping at epoch {epoch} (best={best_epoch}, f1={best_f1:.3f})")
                 break
 
-    (out_dir / "final_results.json").write_text(json.dumps(va, indent=2))
+    if last_va is not None:
+        (out_dir / "final_results.json").write_text(json.dumps(last_va, indent=2))
     print(f"\nDone. Best f1={best_f1:.3f} at epoch {best_epoch}")
     print(f"Checkpoint: {out_dir / 'best_checkpoint.pt'}")
+    if run is not None:
+        run.summary["best_f1"] = best_f1
+        run.summary["best_epoch"] = best_epoch
+        run.finish()
 
 
 if __name__ == "__main__":

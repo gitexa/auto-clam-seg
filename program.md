@@ -1,176 +1,115 @@
-# Autoresearch-CLAM-Seg: Autonomous TLS + GC Panoptic Segmentation
+# GARS v3 — TLS + GC pixel segmentation on TCGA
 
-You are an autonomous research agent. Your job is to improve a panoptic TLS + GC segmentation model by running experiments in a loop — modifying training code and model architecture, evaluating results, and keeping or discarding changes. The main aim is to achieve very good TLS and GC predictions aggregated on slide-level for clinical analysis, avoiding false positives and strong deviations (predicted count vs true count per slide). **Counting accuracy is the primary clinical metric.**
+Successor to the v2.0 dual-sigmoid panoptic work (history in
+`experiment_log_.md` / `program_.md`). Reproduction of GARS recovered
+from wandb after the Apr 2026 VM crash, and the platform for new
+experiments going forward.
 
----
+## Goal
 
-## Setup (once, at start of session)
+A two-stage cascade that beats the GNCAF baseline on GC pixel-dice while
+running ~300× faster:
 
-Do all of this automatically — do NOT ask the human for confirmation:
+| | GNCAF (paper) | GARS v3 |
+|---|---|---|
+| mDice | 0.688 | 0.714 |
+| GC dice | 0.625 | 0.710 |
+| Inference | 5–10 min/slide | ~1.5 s/slide |
+| Params | 57 M | 10.1 M |
 
-1. **Create run tag**: Use today's date (e.g. `apr11`). If branch exists, append `-2`.
-2. **Create git worktree**:
-   ```bash
-   cd /home/ubuntu/profile-clam
-   git worktree add /home/ubuntu/autoresearch-clam-seg/clam-worktree autoresearch/seg-<tag>
-   ```
-3. **Read these files** for full context:
-   - This file (`program.md`)
-   - `clam-worktree/train_segmentation.py` — config constants, training loop, optimizer, scheduler, augmentation
-   - `clam-worktree/models/segmentation_decoder.py` — model architecture, CNN decoder, loss functions, heads
-   - `clam-worktree/prepare_segmentation.py` — data loading, dataset, splits, metrics, mask caching
-   - `experiment_log.md` — your experiment journal. Update after each experiment.
-4. **Verify mask cache**: Check `/home/ubuntu/ahaas-persistent-std-tcga/data/metadata/annotations/hooknet/mask_cache/all_masks_panoptic_tls_gc.pt` exists (or let it build).
-5. **Initialize `results.tsv`** if empty (header row only).
-6. **Immediately start** the experiment loop.
+## Architecture (verified strict-load against recovered checkpoints)
 
----
+- **Stage 1 — `GraphTLSDetector`** (~825 K params, GATv2 3-hop variant):
+  graph TLS gate over UNI-v2 patch embeddings. Selects ~0.5 % of patches
+  as TLS-positive.
+  - `proj`: `Linear(1536→256) + LayerNorm`
+  - `gnn_layers`: `n × {GATv2Conv(256, 64, heads=4) | GCNConv(256, 256)}` with residual + post-norm
+  - `head`: `Linear(256, 128) → GELU → Dropout → Linear(128, 1)`
+- **Stage 2 — `UNIv2PixelDecoder`** (~9.3 M params, hidden=64): per-patch
+  3-class segmentation (bg / TLS / GC) at native 256 × 256 resolution.
+  - `spatial_basis`: `Linear(1536→512) → GELU → Linear(→16²·C) → reshape → LayerNorm`
+  - `dec0..dec3`: `Bilinear×2 + DoubleConv(in→out)`, fixed channel
+    sequence `C → 64 → 32 → 16 → 8`, spatial `16 → 32 → 64 → 128 → 256`
+  - `seg_head`: `Conv2d(8, 3, 1)`
+- **Cascade**: Stage 1 scores all patches → threshold → Stage 2 decodes
+  selected patches → stitch per-patch argmax tiles into a slide-level grid.
 
-## Architecture
-
-Multi-head panoptic model: Linear projection + optional spatial aggregation + CNN decoder + heads:
-- **Semantic head**: 3-class softmax (background=0, TLS=1, GC=2) — multi-class focal + per-class dice loss
-- **TLS Center head**: Gaussian heatmap at TLS instance centroids (weighted BCE)
-- **GC Center head**: Gaussian heatmap at GC instance centroids (weighted BCE)
-- **Offset head**: (dy, dx) vectors (currently disabled, offset_weight=0)
-
-Counting: peak detection on class-specific center heatmaps gated by semantic mask.
-
-### Best architecture (from 50 TLS-only experiments):
-- No GNN (proven unnecessary — UNI-v2 features are locally sufficient - might be different for TLS+GC)
-- hidden_dim=384, upsample_factor=4
-- 5x5 depthwise separable conv decoder
-- 5x5 grid spatial aggregation (Conv2d on scattered grid, helps counting)
-- Bilinear upsampling
-
----
+Reference papers in `paper/`: `GNCAF.pdf`, `GCUNET.pdf`.
 
 ## Data
 
-- **Patch features**: UNI-v2 embeddings (1536-d) from 256px patches at 20x, in zarr format
-- **Masks**: `/home/ubuntu/ahaas-persistent-std-tcga/data/metadata/annotations/hooknet/masks_tls_gc/` — 767 multi-class TIF files (0=bg, 1=TLS, 2=GC)
-- **Metadata**: `df_summary_v10.csv` — has tls_num, gc_num, gc_present columns
-- **Stats**: 260/767 slides have GC (~34%), GC is ~6-7% of TLS pixels, mean 1.04 GC instances/slide
-- **Splits**: 5-fold stratified by (cancer_type, tls_bucket), 201 test slides excluded
+- **Patch features**: UNI-v2 (1536-d) at 20× / 256 px in zarr v3 format
+  (BLCA + KIRC + LUSC). Staged to local SSD at
+  `/home/ubuntu/local_data/zarr/`.
+- **Masks**: HookNet annotations, 767 multi-class TIFs (0=bg, 1=TLS,
+  2=GC), staged to `/home/ubuntu/local_data/hooknet_masks_tls_gc/`.
+- **Splits**: `prepare_segmentation.create_splits` — patient-stratified
+  5-fold by (cancer_type, tls_bucket); 814 slides post test-exclusion;
+  for `k_folds=1` fold 0 is val (~166 slides), folds 1-4 are train.
+- **Stage 2 patch cache**: `/home/ubuntu/local_data/tls_patch_dataset.pt`
+  (~4.7 GB), built once by `tls_patch_dataset.py`.
 
----
+## Configs (Hydra)
 
-## What you CAN modify
+All training scripts use Hydra. Configs live under
+`recovered/scaffold/configs/`:
 
-In `clam-worktree/`:
-- `train_segmentation.py` — config constants, training loop, optimizer, scheduler, augmentation, evaluation
-- `models/segmentation_decoder.py` — model architecture, CNN decoder, loss functions, heads, task formulation
-- `prepare_segmentation.py` — data loading, mask caching, metrics (for structural changes like adding GC)
+```
+configs/
+├── stage1/{config,model/{gatv2_3hop,gcn_3hop,no_gnn},train/stage1}.yaml
+├── stage2/{config,model/{univ2_decoder_h64,univ2_decoder_h128},train/stage2}.yaml
+└── cascade/config.yaml
+```
 
----
-
-## Benchmarks (targets to beat)
-
-| Task | Metric | Value |
-|------|--------|-------|
-| Binary classification | AUC | 0.834 |
-| Binary classification | balanced_acc | 0.783 |
-| TLS count regression | Spearman | 0.774 |
-| TLS count regression | R² | 0.589 |
-| TLS count regression | MAE | 0.593 |
-| TLS count regression | bucket_balanced_acc | 0.632 |
-
-### Metrics tracked per epoch:
-**TLS**: val_dice, count_sp, count_r2, count_mae, count_median_ae, det_auc, bkt_bacc
-**GC**: dice_gc, gc_count_sp, gc_count_r2, gc_count_mae, gc_count_median_ae, gc_det_auc
-**GC hard cases**: gc_low_tls_rec (GC recall in <5 TLS slides), gc_high_tls_fp (FP rate in ≥10 TLS no-GC slides)
-
-### Best v2.0 results (65+ experiments):
-| Metric | TLS | GC | Benchmark |
-|--------|-----|-----|-----------|
-| count_sp | **0.902** | **0.795** | 0.774 |
-| count_r2 | **0.863** | **0.792** | 0.589 |
-| det_auc | **0.944** | **0.893** | 0.834 |
-| bkt_bacc | **0.774** | — | 0.632 |
-| dice | 0.593 | 0.000* | 0.600 |
-| gc_high_tls_fp | — | 14-20% | — |
-
-*GC dice=0 due to extreme sparsity at patch resolution (31 median GC pixels at 4x). GC counting works via center head.
-
-### GC targets (new):
-- dice_gc > 0.3 (first target — GC is very sparse)
-- gc_det_auc > 0.7 (GC presence detection)
-- gc_count_sp > 0.5 (GC instance counting)
-
----
-
-## Running experiments
+Override on the CLI:
 
 ```bash
-# Launch (non-blocking)
-python run_experiment.py start
-
-# Check progress
-python run_experiment.py status
-
-# Kill and collect results
-python run_experiment.py kill
+python train_gars_stage1.py model=gcn_3hop train.lr=5e-4 label=v3.0_lr5e4
+python train_gars_stage2.py model=univ2_decoder_h128
 ```
 
-The training script prints machine-parseable lines:
-```
-EPOCH epoch=1 train_loss=... val_dice=... dice_tls=... dice_gc=... count_sp=... det_auc=... ...
-RESULT run_id=seg_v1.0_xxx val_dice=... dice_gc=... count_sp=... ...
-```
+Each run dumps the resolved config to `<out_dir>/config.yaml` and Hydra's
+auto-dump to `<out_dir>/.hydra/{config,hydra,overrides}.yaml`.
 
-Parse with: `grep "^EPOCH\|^RESULT" run_stdout.log`
+## Wandb
 
----
+All training scripts log to `wandb` project `tls-pixel-seg`. Disable
+with `WANDB_MODE=disabled` (e.g. for smoke tests).
 
-## Logging results
+## Quick-start
 
-`results.tsv` (tab-separated):
+```bash
+cd /home/ubuntu/auto-clam-seg/recovered/scaffold
 
-```
-commit	val_dice	det_auc	inst_sp	count_r2	bkt_bacc	status	description
-```
+# 1. (One-time) verify model architecture matches recovered checkpoints.
+python verify_stage1_ckpt.py     # All OK — 824k/626k/427k params
+python verify_stage2_ckpt.py     # All OK — 9.3M/17.7M params
 
----
+# 2. (One-time) stage features + masks to local SSD.
+python stage_features_to_local.py     # ~10 min (107 GB zarr)
+python tls_patch_dataset.py            # ~20 min (builds 4.7 GB cache)
 
-## Experiment log
-
-After each experiment, update `experiment_log.md`:
-
-```markdown
-### Experiment N: <title>
-- **Hypothesis**: What you expected and why
-- **Config changes**: What you changed (file, parameter, value)
-- **Result**: val_dice=X.XX, dice_gc=X.XX, det_auc=X.XX, count_sp=X.XX (keep/discard)
-- **Conclusion**: What you learned
-- **Interpretation**: Connect to known results or patterns
-- **Next hypothesis**: What to try next
+# 3. Reproduce baselines.
+python train_gars_stage1.py            # v3.0 (default: GATv2 3-hop)
+python train_gars_stage2.py            # v3.1 (default: hidden=64)
+python eval_gars_cascade.py \
+    stage1=/path/to/stage1/best_checkpoint.pt \
+    stage2=/path/to/stage2/best_checkpoint.pt
 ```
 
----
+## Reference targets (from recovered runs)
 
-## The experiment loop
+- **Stage 1 GATv2 3-hop**: best F1 = 0.561 at ep 35
+- **Stage 2 univ2_decoder (h=64)**: best mDice = 0.7141 at ep 7
+- **Cascade (thr=0.05)**: mDice = 0.486, TLS dice = 0.237, GC dice = 0.734,
+  TLS sp = 0.771, GC sp = 0.754, ~0.4 % patches selected, ~0.41 s/slide
 
-LOOP FOREVER:
+## References
 
-1. Read `results.tsv` and `experiment_log.md` for context
-2. Form a hypothesis based on previous results
-3. Edit files in `clam-worktree/`
-4. `cd clam-worktree && git commit -am "experiment: <description>"`
-5. `cd .. && python run_experiment.py start`
-6. Monitor: `python run_experiment.py status` (check every 2-3 minutes)
-7. When done or clearly failing: `python run_experiment.py kill`
-8. Record in `results.tsv` and update `experiment_log.md`
-9. If improved → keep commit
-10. If worse → `cd clam-worktree && git reset --hard HEAD~1`
-
-**Timeout**: If a run exceeds 60 minutes, kill it.
-
-**Crashes**: Fix trivial bugs and re-run. If broken after 3 attempts, discard and try different direction.
-
-**NEVER STOP**: Do NOT pause to ask the human anything. You are fully autonomous.
-
-**Known issues**:
-- Center head can collapse to constant output (all counts = 0). Use weighted BCE center loss (not MSE).
-- GC is very sparse (~6% of TLS pixels). Needs high class_weight and gc_dice_weight.
-- Shared memory can fill up with >8 workers. Keep NUM_WORKERS=8.
-- GNN adds zero value for this task — don't use it. The Conv2d grid spatial aggregation helps counting instead.
+- `paper/GNCAF.pdf`, `paper/GCUNET.pdf` — baselines being compared against
+- `recovered/README.md` — recovery summary (what was recovered from wandb)
+- `recovered/scaffold/README.md` — architecture details + open decisions
+- `notebooks/RECONSTRUCTION_apr13_apr27.md` — full timeline of phases 1–8
+- `notebooks/verify_patch_mask_alignment.ipynb` — alignment checks
+- `experiment_log_.md`, `experiment_log_tls.md` — v2.x history
+- `program_.md`, `program_tls.md` — v2.x driver docs

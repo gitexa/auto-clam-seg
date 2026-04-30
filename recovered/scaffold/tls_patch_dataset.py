@@ -116,31 +116,27 @@ def _process_one_slide(args: tuple[dict, str]) -> dict[str, Any] | None:
 
     grp = zarr.open(entry["zarr_path"], mode="r")
     features = np.asarray(grp["features"][:], dtype=np.float32)         # (N, 1536)
-    coords = np.asarray(grp["coords"][:], dtype=np.int64)               # (N, 2)
+    coords = np.asarray(grp["coords"][:], dtype=np.float32)             # (N, 2)
+    coords_i = coords.astype(np.int64)
     n = features.shape[0]
 
-    # Open mask TIF at native resolution (level 0). We crop per-patch
-    # tiles directly from the file rather than loading the full slide
-    # mask — much smaller working set.
+    # Memory-efficient mask access: open the level-0 TIF page as a zarr
+    # view so per-patch crops are windowed reads (≪ 1 MB each) instead
+    # of loading the whole 3-7 GB page.
     tif = tifffile.TiffFile(mask_path)
-    page = tif.pages[0]
-    full_h, full_w = page.shape[:2]
-    arr = page.asarray()  # ~slide-native resolution; sizes seen ~1k-25k px
+    full_h, full_w = tif.pages[0].shape[:2]
+    z0 = zarr.open(tifffile.imread(mask_path, aszarr=True, level=0), mode="r")
 
-    # Mask coords are in mask-pixel space; slide coords are in slide-pixel
-    # space. They share level-0 resolution by construction (same WSI
-    # pyramid alignment), so 1:1 — but if the mask TIF is downsampled
-    # (full_h < expected slide_h), scale accordingly.
-    coord_max_x = coords[:, 0].max() + PATCH_SIZE
-    coord_max_y = coords[:, 1].max() + PATCH_SIZE
-    scale = max(1.0, max(coord_max_x / full_w, coord_max_y / full_h))
+    # Slide coords vs mask coords: usually 1:1 (level-0 alignment), but
+    # if the mask TIF is at a coarser MPP we scale down.
+    coord_max_x = float(coords[:, 0].max()) + PATCH_SIZE
+    coord_max_y = float(coords[:, 1].max()) + PATCH_SIZE
+    scale = max(1.0, coord_max_x / full_w, coord_max_y / full_h)
     if scale > 1.0:
-        # Mask is at lower resolution than slide coords — downsample
-        # patch coords to mask space and skip if patch < 1 mask pixel.
         coords_m = (coords / scale).astype(np.int64)
         psize_m = max(1, int(PATCH_SIZE / scale))
     else:
-        coords_m = coords
+        coords_m = coords_i
         psize_m = PATCH_SIZE
 
     feats_kept: list[np.ndarray] = []
@@ -152,11 +148,9 @@ def _process_one_slide(args: tuple[dict, str]) -> dict[str, Any] | None:
         y1 = min(y + psize_m, full_h)
         if x1 <= x or y1 <= y:
             continue
-        tile = arr[y:y1, x:x1]
+        tile = np.asarray(z0[y:y1, x:x1])  # windowed read
         if tile.max() == 0:
             continue
-        # Resize to PATCH_SIZE × PATCH_SIZE with nearest-neighbour
-        # to preserve class labels. Cheap because tiles are small.
         if tile.shape != (PATCH_SIZE, PATCH_SIZE):
             t = torch.from_numpy(tile.astype(np.uint8)).unsqueeze(0).unsqueeze(0).float()
             t = torch.nn.functional.interpolate(
@@ -217,9 +211,11 @@ def build_tls_patch_dataset(
     entries = ps.build_slide_entries()
     entries = [
         e for e in entries
-        if e.get("mask_path") is not None
+        if e.get("mask_path") and e.get("zarr_path")  # both non-empty
         and patient_id_from_slide(e["slide_id"]) not in test_patients
     ]
+    if verbose:
+        print(f"  {len(entries)} slides with both mask and features")
 
     args_list = [(e, local_mask_dir) for e in entries]
     results: list[dict[str, Any]] = []

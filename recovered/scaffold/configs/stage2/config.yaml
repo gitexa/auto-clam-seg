@@ -1,0 +1,27 @@
+# Top-level Stage 2 config.
+defaults:
+  - model: univ2_decoder_h64
+  - train: stage2
+  - _self_
+
+stage: stage2
+label: v3.1_univ2_decoder_h64
+seed: 42
+out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
+cache_path: /home/ubuntu/local_data/tls_patch_dataset.pt
+
+wandb:
+  enabled: true
+  project: tls-pixel-seg
+  entity: null
+  mode: ${oc.env:WANDB_MODE,online}
+  tags: [v3, gars, stage2]
+
+hydra:
+  run:
+    dir: ${out_root}/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+  sweep:
+    dir: ${out_root}/multirun/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+    subdir: ${hydra.job.num}_${hydra.job.override_dirname}
+  job:
+    chdir: false

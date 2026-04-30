@@ -1,0 +1,9 @@
+# @package model
+# Stage 1 — GraphTLSDetector with GCN 3-hop.
+# Verified strict-load against checkpoint hwo25qzz (625,921 params at 256/512 px).
+gnn_type: gcn
+n_hops: 3
+hidden_dim: 256
+dropout: 0.1
+gat_heads: 4   # unused for gcn
+in_dim: 1536

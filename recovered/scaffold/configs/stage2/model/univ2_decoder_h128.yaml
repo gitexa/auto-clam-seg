@@ -1,0 +1,8 @@
+# @package model
+# Stage 2 — UNIv2PixelDecoder, h=128.
+# Verified strict-load against checkpoint cvrvn8yb (17,744,571 params).
+in_dim: 1536
+bottleneck: 512
+hidden_channels: 128
+spatial_size: 16
+n_classes: 3
