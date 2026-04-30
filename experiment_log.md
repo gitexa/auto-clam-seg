@@ -110,6 +110,17 @@ Started 2026-04-30 after v3.0/v3.1/v3.2 baselines locked in.
 Per-experiment: edit → commit → train → evaluate → keep (commit) or
 discard (`git reset --hard HEAD~1`).
 
+### v3.3a — Stage 2 hidden_channels=128 (KEEP — new baseline)
+
+- **Hypothesis**: 2× decoder bottleneck channels gives the model more
+  capacity for joint TLS+GC representation. Strict-load already
+  verified for the 17.7 M-param variant.
+- **Config**: `model=univ2_decoder_h128`, all other defaults.
+- **Result**: best mDice=0.7121 at ep10, early-stopped ep20. GC dice
+  peaked 0.908 at ep4. Run `ajy0liu1`.
+- **Conclusion**: KEEP. **+0.011 mDice over baseline 0.7012**. New
+  Stage 2 baseline.
+
 ---
 
 ## Next hypotheses (v3.3+)
