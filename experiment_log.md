@@ -79,11 +79,36 @@ GC pixel-dice 0.71 is the headline win — closes the v2.0 gap from 0.
 
 - **Hypothesis**: Stitching v3.0 + v3.1 outputs reproduces recovered
   cascade numbers (mDice 0.486, GC dice 0.734 at thr=0.05).
-- **Config**: `python eval_gars_cascade.py stage1=<v3.0> stage2=<v3.1>
-  thresholds=[0.05,0.10,0.20,0.30,0.40,0.50]`.
-- **Status**: pending v3.0 completion.
-- **Result**: TBD.
-- **Conclusion**: TBD.
+- **Config**: `eval_gars_cascade.py stage1=<v3.0 ckpt> stage2=<v3.1 ckpt>`
+  on 124 val slides with masks.
+- **Result**: Run `7k1aae17`.
+
+  | thr | mDice | TLS d | GC d | TLS sp | GC sp | sel% |
+  |---|---|---|---|---|---|---|
+  | 0.05 | 0.376 | 0.408 | 0.345 | 0.773 | 0.664 | 2.2 |
+  | 0.10 | 0.419 | 0.448 | 0.389 | 0.814 | 0.675 | 1.7 |
+  | 0.20 | 0.450 | 0.494 | 0.406 | 0.844 | 0.685 | 1.3 |
+  | 0.30 | 0.474 | 0.522 | 0.425 | 0.866 | 0.685 | 1.1 |
+  | 0.40 | 0.483 | 0.532 | 0.435 | 0.874 | 0.678 | 0.9 |
+  | **0.50** | **0.512** | 0.530 | 0.494 | 0.874 | **0.695** | 0.7 |
+
+  Best mDice=0.512 at thr=0.5. **Below recovered (0.486 at thr=0.05)
+  on the headline mDice; HIGHER on TLS dice; LOWER on GC dice (0.494
+  vs 0.734)**. The GC drop is the standout regression — likely
+  caused by Stage 2 training on the over-permissive patch label set.
+- **Conclusion**: KEEP as v3 baseline. Autoresearch should target
+  Stage 2 GC dice or cascade GC dice as the primary improvement
+  metric (mDice as secondary).
+
+---
+
+## Autoresearch loop (v3.3+)
+
+Started 2026-04-30 after v3.0/v3.1/v3.2 baselines locked in.
+**Target metric**: Stage 2 `val_mDice` (baseline 0.7012; iteration cost
+~5 min/run). Cascade GC dice (baseline 0.494) re-checked periodically.
+Per-experiment: edit → commit → train → evaluate → keep (commit) or
+discard (`git reset --hard HEAD~1`).
 
 ---
 
