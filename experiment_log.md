@@ -249,7 +249,7 @@ graph branch modulates pixel decoder for every patch.
   Honest aggregate-then-divide dice is structurally hard for GC
   (rare class, bg-dominated denominator).
 
-### v3.5f — bg=0.5 ratio + positives-only val (KEEP — NEW BEST)
+### v3.5f — bg=0.5 ratio + positives-only val (KEEP per-positives, but see v3.5g)
 
 - **Hypothesis**: Train with bg sampling for proper slide-level
   generalisation, but **eval on positives only** with per-patch dice
@@ -259,10 +259,95 @@ graph branch modulates pixel decoder for every patch.
   Val: positives only with `per_class_dice`.
 - **Result**: best mDice=**0.7472** at ep15, early-stopped ep25.
   TLS=0.700, GC=0.936. Run `pqwt64fe`.
-- **Conclusion**: **KEEP — +0.014 over v3.4b cascade, +0.046
-  cumulative over v3.1. First single-pass model to beat the cascade.**
-  E2e architecture works when bg sampling is proportional and val
-  metric matches deployment regime.
+- **Conclusion**: KEEP per-positives win (+0.014 over v3.4b cascade,
+  +0.046 cumulative on per-positives metric). But this metric was
+  insufficient — see v3.5g for the deployment-honest verdict.
+
+### v3.5g — bg=1.0 balanced + full-slide eval at end (REJECTED at slide level)
+
+- **Hypothesis**: 1:1 bg:positive sampling will train the model to
+  predict bg correctly on bg patches, closing v3.5f's
+  positives-only-val blind spot.
+- **Config**: `bg_decode_ratio=1.0` (relative). End-of-training
+  full-slide eval added (decode every patch in 124 val slides, build
+  slide-level patch grid, compute slide-level dice + connected-
+  component counts vs ground-truth `tls_num`/`gc_num`).
+- **Result (per-positives val, per epoch)**: best mDice=**0.7441** ep26.
+  Comparable to v3.5f.
+- **Result (full-slide eval, deployment-honest)**: 124 slides, 7 min.
+
+  | metric | full-slide | per-positives |
+  |---|---|---|
+  | TLS dice | **0.283** | 0.688 |
+  | GC dice | **0.058** | 0.881 |
+  | TLS count Spearman | 0.622 | 0.978 |
+  | GC count Spearman | 0.473 | 0.634 |
+  | TLS count MAE | **57.2** | 3.8 |
+  | GC count MAE | **41.2** | 3.3 |
+
+  Compare to v3.2 cascade slide-level (recovered numbers at thr=0.05):
+  TLS dice 0.408, GC dice 0.345, TLS sp 0.771, GC sp 0.754.
+  Run `yg5n311r`.
+- **Conclusion**: **REJECT at deployment**. The single-pass e2e
+  catastrophically over-predicts TLS/GC on bg patches it never
+  learned to discriminate enough. Cascade > e2e by a wide margin
+  (+0.25 TLS dice, +0.29 GC dice at slide level). The v3.5f
+  per-positives win was an artifact of the eval regime, not a real
+  improvement. **The cascade architecture is the biggest lever** —
+  Stage 1 filters most bg before Stage 2, sidestepping the over-call
+  problem.
+
+---
+
+## Next hypotheses (priority-ordered by expected lever size)
+
+### H1 — Close the cascade-eval GC dice gap (0.49 mine vs 0.73 recovered)
+
+- **Magnitude**: +0.24 GC dice, ~6× larger than any single
+  hyperparameter tweak from v3.3.
+- **Suspects**: (a) my patch-label rule is more permissive (2.4×
+  more TLS-positive patches); (b) slide-level mask-cache resolution
+  (upsample_factor=4) may differ from what the recovered cascade
+  eval used; (c) Stage 1 selection rate is 2.2 % at thr=0.05 vs
+  recovered 0.4 %.
+- **Action**: instrument `eval_gars_cascade.py` to log each pipeline
+  decision (selected count, mask resolution, count_components
+  threshold, etc.) and diff against the recovered eval log line by
+  line. Patch the divergences, re-run cascade eval.
+
+### H2 — Slide-level training for e2e (only if cascade route exhausts)
+
+- Train e2e with bg_decode_ratio ≥ 5 or all bg per slide. The
+  model needs many more bg examples to learn the boundary.
+  Risk: gradient swamped by easy bg, TLS underperforms again.
+
+### H3 — Patch-label rule match to recovered
+
+- The recovered Stage 2 dataset had 26 364 TLS patches; mine has
+  65 613 (min=1) or 51 829 (min=4096). Try `min_tls_pixels` higher
+  (8192, 16384) or reproduce the original area threshold if we can
+  recover it from the recovered code path. Affects all downstream
+  metrics for direct comparability.
+
+### H4 — Stage 1 operating point
+
+- Re-train Stage 1 with a higher precision target (e.g.,
+  `pos_weight=2` instead of 5). Cascade GC dice peaks at thr=0.5 in
+  my eval; the recovered cascade peaks at thr=0.05 with 4× fewer
+  selections. Higher-precision Stage 1 + lower threshold should
+  reproduce the recovered selection rate.
+
+### H5 — Train Stage 2 with bg patches but eval cascade-style
+
+- Bridge between v3.4b (positives-only training, cascade-best at
+  deployment) and v3.5 (e2e). Train Stage 2 alone with limited bg
+  context, then run cascade eval. Test whether Stage 2 alone gains
+  at slide level when bg-aware.
+
+### Deferred
+
+- v3.3+ Stage 2 hyperparameter search saturated (+0.005 incremental).
+- Joint S1+S2 training: known to collapse (recovered ufz9a2o4).
 
 ---
 
