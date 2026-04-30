@@ -205,6 +205,65 @@ discard (`git reset --hard HEAD~1`).
   recovered Stage 2 profile (TLS 0.719, GC 0.710). Label tightening
   validated. Pushing min_tls_pixels higher next.
 
+### v3.4b — v3.3g + min_tls_pixels=4096 patch label (KEEP)
+
+- **Hypothesis**: Tighten further to ~6.25 % coverage threshold.
+- **Config**: v3.3g + `cache_path=tls_patch_dataset_min4096.pt`
+  (51 829 patches, −21 % vs baseline).
+- **Result**: best mDice=**0.7329** at ep13, early-stopped ep23.
+  TLS 0.693, GC 0.870. Run `eim80ek7`.
+- **Conclusion**: **KEEP — +0.006 over v3.4a, +0.032 cumulative**.
+  Tighter labels keep helping. New cascade-track baseline.
+
+---
+
+## End-to-end (v3.5+ — single-pass GraphEnrichedDecoder)
+
+Architecture: `recovered/scaffold/train_gars_e2e.py`. UNI-v2 features
+→ 3× GATv2 graph context → concat with raw features → spatial decoder
+(16 → 256 px) → 3-class output. **No discrete patch selection** —
+graph branch modulates pixel decoder for every patch.
+
+### v3.5b — recovered config + v3.3 lessons (DISCARD — initial)
+
+- **Hypothesis**: Reproduce recovered `qy3pj74h` (mDice=0.720) and
+  apply v3.3 wins (`class_weights=[1,5,3]`, `gc_dice_weight=1`).
+- **Config**: bg_decode_ratio=0.5 interpreted as "50 % of bg patches"
+  (~8500 bg/slide; capped at 200 total).
+- **Result**: best mDice=0.387 at ep21. Model collapsed to bg
+  prediction (val_tls=0.15, val_gc=0). Run `s4lmxpq7`.
+- **Conclusion**: DISCARD. bg sampling overwhelmed the TLS signal.
+  Two bugs identified: (a) `per_class_dice` averages per-patch and
+  uses eps trick, giving spurious 1.0 on bg-only patches; (b)
+  `bg_decode_ratio` reinterpreted as ratio-relative-to-positives
+  (0.5 = 1 bg per 2 pos), not "50 % of all bg".
+
+### v3.5c-e — bg ratio + GC weight sweep (DISCARD)
+
+- **v3.5c** (bg_decode_ratio=0): TLS=0.748, GC=0 (no bg patches → GC
+  never seen as separate class). Doesn't generalize at slide level.
+- **v3.5d** (bg=0.5 ratio, [1,5,3], gc_dw=1): mDice=0.508. bg dice
+  recovers (0.77) but GC stays at 0 with batch-aggregate dice.
+- **v3.5e** (bg=0.5, class_weights=[1,3,15], gc_dw=5): mDice=0.571
+  ep5; GC climbs to 0.146 with heavy weighting but plateaus.
+  Honest aggregate-then-divide dice is structurally hard for GC
+  (rare class, bg-dominated denominator).
+
+### v3.5f — bg=0.5 ratio + positives-only val (KEEP — NEW BEST)
+
+- **Hypothesis**: Train with bg sampling for proper slide-level
+  generalisation, but **eval on positives only** with per-patch dice
+  to make metrics directly comparable to cascade Stage 2.
+- **Config**: `bg_decode_ratio=0.5` (relative), `class_weights=[1,5,3]`,
+  `gc_dice_weight=1`. Train: positives + half as many bg = ~75/slide.
+  Val: positives only with `per_class_dice`.
+- **Result**: best mDice=**0.7472** at ep15, early-stopped ep25.
+  TLS=0.700, GC=0.936. Run `pqwt64fe`.
+- **Conclusion**: **KEEP — +0.014 over v3.4b cascade, +0.046
+  cumulative over v3.1. First single-pass model to beat the cascade.**
+  E2e architecture works when bg sampling is proportional and val
+  metric matches deployment regime.
+
 ---
 
 ## Next hypotheses (v3.3+)

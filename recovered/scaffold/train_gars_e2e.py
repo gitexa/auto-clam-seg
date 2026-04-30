@@ -46,7 +46,7 @@ from torch.optim import AdamW
 from torch_geometric.nn import GATv2Conv
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from train_gars_stage2 import compute_loss  # reuse
+from train_gars_stage2 import compute_loss, per_class_dice  # reuse
 
 
 def per_class_dice_batch(
@@ -228,6 +228,7 @@ def run_one_slide(
     train: bool,
     rng: np.random.Generator,
     patch_mask_lookup: dict,    # {slide_short: {patch_idx: native_mask_tensor}}
+    return_pred_grid: bool = False,
 ) -> dict:
     """One slide: graph forward (all patches) → sample patches → decode.
 
@@ -257,8 +258,15 @@ def run_one_slide(
     pos_set = set(pos_idx)
     neg_idx = [i for i in range(n) if i not in pos_set]
     rng.shuffle(neg_idx)
-    n_neg_keep = int(cfg_train.bg_decode_ratio * len(neg_idx))
-    selected = pos_idx + neg_idx[:n_neg_keep]
+    # bg_decode_ratio is "ratio of bg-to-positive". 0.5 → 1 bg per 2 pos.
+    # 1.0 → balanced. 0 → no bg (positives-only).
+    # VAL: always positives-only so per-class dice is comparable to
+    # cascade Stage 2 (which trained and evaluated on positives only).
+    if train:
+        n_neg_keep = int(cfg_train.bg_decode_ratio * len(pos_idx))
+        selected = pos_idx + neg_idx[:n_neg_keep]
+    else:
+        selected = list(pos_idx)
     rng.shuffle(selected)
     if len(selected) > cfg_train.max_patches_per_slide:
         selected = selected[: cfg_train.max_patches_per_slide]
@@ -268,6 +276,7 @@ def run_one_slide(
     patch_masks: list[torch.Tensor] = []
     patch_feats: list[torch.Tensor] = []
     patch_graphs: list[torch.Tensor] = []
+    selected_idx: list[int] = []
     for i in selected:
         if i in patch_to_mask:
             m = patch_to_mask[i]                                        # (256, 256) uint8
@@ -276,9 +285,11 @@ def run_one_slide(
         patch_masks.append(m.long())
         patch_feats.append(features[i])
         patch_graphs.append(graph_feat[i])
+        selected_idx.append(i)
 
     if not patch_masks:
         return None
+    pred_classes_per_selected: list[int] = [] if return_pred_grid else None
 
     feats_t = torch.stack(patch_feats, dim=0).to(device)
     graphs_t = torch.stack(patch_graphs, dim=0).to(device)
@@ -304,13 +315,29 @@ def run_one_slide(
             accumulated_loss = weighted if accumulated_loss is None else accumulated_loss + weighted
         total_loss_val += float(loss.detach()) * f.shape[0]
         n_dec += f.shape[0]
-        d = per_class_dice_batch(logits.detach(), y)
+        # In val mode (positives only), use per-patch averaged dice with
+        # the eps trick so metrics are comparable to cascade Stage 2.
+        # In train mode, use the honest aggregate-then-divide variant.
+        if train:
+            d = per_class_dice_batch(logits.detach(), y)
+        else:
+            d = per_class_dice(logits.detach(), y)
         for j in range(3):
             sums[j] += d[j] * f.shape[0]
+        if pred_classes_per_selected is not None:
+            argmax = logits.detach().argmax(dim=1)  # (B, 256, 256)
+            for k in range(argmax.shape[0]):
+                tile = argmax[k]
+                if (tile == 2).any():
+                    pred_classes_per_selected.append(2)
+                elif (tile == 1).any():
+                    pred_classes_per_selected.append(1)
+                else:
+                    pred_classes_per_selected.append(0)
     if train and accumulated_loss is not None:
         (accumulated_loss / max(1, n_dec)).backward()
 
-    return {
+    out = {
         "loss": total_loss_val / max(1, n_dec),
         "dice_bg": sums[0] / max(1, n_dec),
         "dice_tls": sums[1] / max(1, n_dec),
@@ -319,6 +346,24 @@ def run_one_slide(
         "n_decoded": n_dec,
         "n_total": n,
     }
+    if pred_classes_per_selected is not None:
+        # Build a slide-level patch grid (one cell per patch = its
+        # dominant predicted class). Used for connected-component
+        # counting downstream.
+        coords_np = batch["coords"].numpy() if hasattr(batch["coords"], "numpy") else np.asarray(batch["coords"])
+        gx = (coords_np[:, 0] / cfg_train.patch_size).astype(np.int64)
+        gy = (coords_np[:, 1] / cfg_train.patch_size).astype(np.int64)
+        gx -= gx.min(); gy -= gy.min()
+        H, W = int(gy.max()) + 1, int(gx.max()) + 1
+        grid = np.zeros((H, W), dtype=np.int64)
+        for k, i in enumerate(selected_idx):
+            grid[gy[i], gx[i]] = pred_classes_per_selected[k]
+        from scipy.ndimage import label
+        n_tls = int(label(grid == 1)[1])
+        n_gc = int(label(grid == 2)[1])
+        out["pred_n_tls"] = n_tls
+        out["pred_n_gc"] = n_gc
+    return out
 
 
 def make_warmup_cosine(optimizer, warmup_epochs: int, total_epochs: int):
@@ -366,6 +411,18 @@ def main(cfg: DictConfig) -> None:
     train_entries = [e for e in train_entries if e.get("mask_path")]
     val_entries = [e for e in val_entries if e.get("mask_path")]
     print(f"Split: {len(train_entries)} train, {len(val_entries)} val (mask-positive only)")
+
+    # Ground-truth instance counts for counting metrics.
+    import pandas as pd
+    meta_df = pd.read_csv(ps.META_CSV)
+    gt_counts: dict[str, tuple[int, int]] = {}
+    for _, row in meta_df.iterrows():
+        sid = str(row.get("slide_id", ""))
+        if sid:
+            gt_counts[sid.split(".")[0]] = (
+                int(row.get("tls_num", 0)),
+                int(row.get("gc_num", 0)),
+            )
 
     print("Building mask cache...")
     mask_dict = ps.build_mask_cache(train_entries + val_entries, cfg.train.upsample_factor)
@@ -466,24 +523,51 @@ def main(cfg: DictConfig) -> None:
         sums_va = [0.0, 0.0, 0.0]
         loss_sum = 0.0
         n_sum = 0
+        gt_tls_list: list[int] = []
+        gt_gc_list: list[int] = []
+        pred_tls_list: list[int] = []
+        pred_gc_list: list[int] = []
         with torch.no_grad():
             for idx in range(len(val_ds)):
-                r = run_one_slide(model, val_ds[idx], device, cw, cfg.train,
+                batch = val_ds[idx]
+                r = run_one_slide(model, batch, device, cw, cfg.train,
                                   train=False, rng=rng,
-                                  patch_mask_lookup=patch_mask_lookup)
+                                  patch_mask_lookup=patch_mask_lookup,
+                                  return_pred_grid=True)
                 if r is None:
                     continue
                 loss_sum += r["loss"] * r["n_decoded"]
                 n_sum += r["n_decoded"]
                 for j, k in enumerate(["dice_bg", "dice_tls", "dice_gc"]):
                     sums_va[j] += r[k] * r["n_decoded"]
+                short_id = batch["slide_id"].split(".")[0]
+                gt = gt_counts.get(short_id)
+                if gt is not None and "pred_n_tls" in r:
+                    gt_tls_list.append(gt[0])
+                    gt_gc_list.append(gt[1])
+                    pred_tls_list.append(r["pred_n_tls"])
+                    pred_gc_list.append(r["pred_n_gc"])
         val_t = time.time() - t0
         va_loss = loss_sum / max(1, n_sum)
         va_mDice = sum(sums_va) / max(1, n_sum) / 3.0
         va_dice_tls = sums_va[1] / max(1, n_sum)
         va_dice_gc = sums_va[2] / max(1, n_sum)
+
+        # Per-slide counting metrics.
+        from scipy.stats import spearmanr
+        from sklearn.metrics import r2_score, mean_absolute_error
+        if len(gt_tls_list) > 1:
+            tls_sp = float(spearmanr(gt_tls_list, pred_tls_list).statistic)
+            gc_sp = float(spearmanr(gt_gc_list, pred_gc_list).statistic) if any(gt_gc_list) else 0.0
+            tls_mae = float(mean_absolute_error(gt_tls_list, pred_tls_list))
+            gc_mae = float(mean_absolute_error(gt_gc_list, pred_gc_list))
+        else:
+            tls_sp = gc_sp = tls_mae = gc_mae = 0.0
+
         last_va = {"loss": va_loss, "mDice": va_mDice,
-                   "dice_tls": va_dice_tls, "dice_gc": va_dice_gc}
+                   "dice_tls": va_dice_tls, "dice_gc": va_dice_gc,
+                   "tls_count_sp": tls_sp, "gc_count_sp": gc_sp,
+                   "tls_count_mae": tls_mae, "gc_count_mae": gc_mae}
 
         scheduler.step()
         lr = optimizer.param_groups[0]["lr"]
@@ -493,6 +577,8 @@ def main(cfg: DictConfig) -> None:
         print(
             f"EPOCH epoch={epoch} train_loss={tr_loss:.4f} val_loss={va_loss:.4f} "
             f"val_mDice={va_mDice:.4f} val_tls={va_dice_tls:.4f} val_gc={va_dice_gc:.4f} "
+            f"tls_sp={tls_sp:.3f} gc_sp={gc_sp:.3f} "
+            f"tls_mae={tls_mae:.2f} gc_mae={gc_mae:.2f} "
             f"train_decoded/slide={n_decoded_total/max(1,len(train_ds)):.0f} "
             f"lr={lr:.2e} train={train_t:.0f}s val={val_t:.0f}s {marker}"
         )
@@ -503,6 +589,8 @@ def main(cfg: DictConfig) -> None:
                 "train/dice_tls": tr_dice_tls, "train/dice_gc": tr_dice_gc,
                 "val/loss": va_loss, "val/mDice": va_mDice,
                 "val/dice_tls": va_dice_tls, "val/dice_gc": va_dice_gc,
+                "val/tls_count_sp": tls_sp, "val/gc_count_sp": gc_sp,
+                "val/tls_count_mae": tls_mae, "val/gc_count_mae": gc_mae,
                 "train/decoded_per_slide": n_decoded_total / max(1, len(train_ds)),
                 "best_mDice": max(best_m, va_mDice),
             }, step=epoch)
