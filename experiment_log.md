@@ -178,6 +178,17 @@ discard (`git reset --hard HEAD~1`).
 - **Conclusion**: DISCARD. **−0.005 vs v3.3d**. Default warmup=3 is
   the sweet spot.
 
+### v3.3g — v3.3d + gc_dice_weight=1 (KEEP — new baseline)
+
+- **Hypothesis**: GC dice was already 0.90 — maybe the dice term is
+  over-weighted (default 2). Lowering to 1 may free capacity for TLS
+  without losing GC.
+- **Config**: v3.3d (`class_weights=[1,5,3]`) + `train.gc_dice_weight=1`.
+- **Result**: best mDice=**0.7257** at ep8, early-stopped ep18.
+  TLS=0.588, GC=0.916. Run `g12d4gr5`.
+- **Conclusion**: **KEEP — +0.002 over v3.3d, +0.024 cumulative**.
+  Sweep `gc_dice_weight ∈ {1, 2, 5}` → best at 1. New Stage 2 baseline.
+
 ---
 
 ## Next hypotheses (v3.3+)
