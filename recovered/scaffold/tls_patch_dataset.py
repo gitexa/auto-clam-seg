@@ -180,7 +180,7 @@ def _process_one_slide(args: tuple[dict, str]) -> dict[str, Any] | None:
 def build_tls_patch_dataset(
     cache_path: str = DEFAULT_CACHE_PATH,
     local_mask_dir: str = DEFAULT_LOCAL_MASK_DIR,
-    n_workers: int = 8,
+    n_workers: int = 16,
     skip_test_patients: bool = True,
     rebuild: bool = False,
     verbose: bool = True,

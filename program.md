@@ -76,6 +76,33 @@ auto-dump to `<out_dir>/.hydra/{config,hydra,overrides}.yaml`.
 All training scripts log to `wandb` project `tls-pixel-seg`. Disable
 with `WANDB_MODE=disabled` (e.g. for smoke tests).
 
+## Checkpoints
+
+Each run dir contains:
+
+| File | Purpose |
+|---|---|
+| `best_checkpoint.pt` | slim — model + config, for inference |
+| `last.pt` | full — model + optimizer + scheduler state, for resume |
+| `config.yaml` + `.hydra/` | full resolved config (3 copies) |
+| `final_results.json` | last-epoch metrics |
+| `train_slides.json` / `val_slides.json` | exact split manifest (independent of numpy version) |
+| `train_gars_*.log` | Hydra-captured stdout |
+
+`eval_gars_cascade.load_stage1/load_stage2` rebuilds the model from
+`obj["config"]["model"]` and loads weights with `strict=True`.
+
+## Throughput knobs (current defaults)
+
+- **Stage 1 DataLoader**: `num_workers=4`, `prefetch_factor=2`,
+  `persistent_workers=true` — async prefetch lets slide N+1 load while
+  the GPU trains on slide N.
+- **Stage 2 DataLoader**: `num_workers=16`, `prefetch_factor=4`,
+  `persistent_workers=true` — in-memory dataset, persistent workers
+  amortise fork cost over many epochs.
+- **Cache builders**: `n_workers=16` (was 8) for both
+  `stage_features_to_local.py` and `tls_patch_dataset.py`.
+
 ## Quick-start
 
 ```bash

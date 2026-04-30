@@ -9,3 +9,6 @@ upsample_factor: 4
 patch_size: 256
 k_folds: 1
 data_fraction: 1.0
+num_workers: 4         # async prefetch for slide-level data loading
+prefetch_factor: 2
+persistent_workers: true

@@ -9,4 +9,6 @@ warmup_epochs: 3
 gc_dice_weight: 2.0
 class_weights: [1.0, 1.0, 3.0]
 val_frac: 0.157
-num_workers: 4
+num_workers: 16
+prefetch_factor: 4
+persistent_workers: true

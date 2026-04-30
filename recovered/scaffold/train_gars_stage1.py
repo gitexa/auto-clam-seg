@@ -139,7 +139,32 @@ def f1_from_confusion(tp: int, fp: int, fn: int, tn: int):
     return rec, prec, f1
 
 
-def run_split(model, dataset, optimizer, criterion, device, train: bool,
+def _identity_collate(batch_list):
+    """One slide per 'batch' — just unwrap the singleton list."""
+    return batch_list[0]
+
+
+def make_slide_loader(dataset, num_workers: int, prefetch_factor: int,
+                      persistent_workers: bool, shuffle: bool):
+    """Per-slide DataLoader with async prefetching.
+
+    batch_size=1 because graph sizes vary per slide. With num_workers>0,
+    slide N+1 loads from local SSD while GPU trains on slide N.
+    """
+    from torch.utils.data import DataLoader
+    return DataLoader(
+        dataset,
+        batch_size=1,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
+        persistent_workers=persistent_workers if num_workers > 0 else False,
+        pin_memory=False,  # tensors are too varied; manual .to(device) below
+        collate_fn=_identity_collate,
+    )
+
+
+def run_split(model, loader, optimizer, criterion, device, train: bool,
               upsample_factor: int, patch_size: int):
     if train:
         model.train()
@@ -150,15 +175,14 @@ def run_split(model, dataset, optimizer, criterion, device, train: bool,
     n_batches = 0
     ctx = torch.enable_grad() if train else torch.no_grad()
     with ctx:
-        for idx in range(len(dataset)):
-            batch = dataset[idx]
-            features = batch["features"].to(device)
+        for batch in loader:
+            features = batch["features"].to(device, non_blocking=True)
             coords = batch["coords"]
             edge_index = batch["edge_index"]
-            edge_index = edge_index.to(device) if edge_index is not None else None
+            edge_index = edge_index.to(device, non_blocking=True) if edge_index is not None else None
             target = patch_labels_from_mask(
                 batch["mask"], coords, patch_size, upsample_factor
-            ).to(device)
+            ).to(device, non_blocking=True)
             logits = model(features, edge_index)
             loss = criterion(logits, target)
             if train:
@@ -233,6 +257,22 @@ def main(cfg: DictConfig) -> None:
         val_entries, mask_dict, cfg.train.upsample_factor, patch_size=cfg.train.patch_size,
     )
 
+    # Save val/train slide IDs so eval can reproduce the split exactly,
+    # without depending on numpy.random.RandomState behavior across versions.
+    (out_dir / "val_slides.json").write_text(json.dumps(
+        [e["slide_id"] for e in val_entries], indent=2,
+    ))
+    (out_dir / "train_slides.json").write_text(json.dumps(
+        [e["slide_id"] for e in train_entries], indent=2,
+    ))
+
+    nw = cfg.train.get("num_workers", 0)
+    pf = cfg.train.get("prefetch_factor", 2)
+    pw = cfg.train.get("persistent_workers", True)
+    train_loader = make_slide_loader(train_ds, nw, pf, pw, shuffle=True)
+    val_loader = make_slide_loader(val_ds, nw, pf, pw, shuffle=False)
+    print(f"DataLoader: {nw} workers, prefetch={pf}, persistent={pw}")
+
     # ─ Model + opt ─
     model = GraphTLSDetector(
         in_dim=cfg.model.in_dim,
@@ -271,11 +311,11 @@ def main(cfg: DictConfig) -> None:
     last_va = None
     for epoch in range(1, cfg.train.epochs + 1):
         t0 = time.time()
-        tr = run_split(model, train_ds, optimizer, criterion, device, train=True,
+        tr = run_split(model, train_loader, optimizer, criterion, device, train=True,
                        upsample_factor=cfg.train.upsample_factor, patch_size=cfg.train.patch_size)
         train_t = time.time() - t0
         t0 = time.time()
-        va = run_split(model, val_ds, optimizer, criterion, device, train=False,
+        va = run_split(model, val_loader, optimizer, criterion, device, train=False,
                        upsample_factor=cfg.train.upsample_factor, patch_size=cfg.train.patch_size)
         val_t = time.time() - t0
         scheduler.step()
@@ -304,9 +344,21 @@ def main(cfg: DictConfig) -> None:
                 "best_f1": max(best_f1, va["f1"]),
             }, step=epoch)
 
+        # Always save `last.pt` (for resume / inference at any epoch).
+        last_payload = {
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "epoch": epoch,
+            "val_metrics": va,
+            "config": OmegaConf.to_container(cfg, resolve=True),
+        }
+        torch.save(last_payload, out_dir / "last.pt")
+
         if is_best:
             best_f1, best_epoch = va["f1"], epoch
             epochs_since_best = 0
+            # Slim checkpoint (no optimizer state) — for inference.
             torch.save(
                 {
                     "model_state_dict": model.state_dict(),

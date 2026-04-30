@@ -238,10 +238,27 @@ def main(cfg: DictConfig) -> None:
     print(f"Split: {len(train_ds)} train, {len(val_ds)} val patches "
           f"({n_val_patients} val patients)")
 
-    train_loader = DataLoader(train_ds, batch_size=cfg.train.batch_size, shuffle=True,
-                              num_workers=cfg.train.num_workers, pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=cfg.train.batch_size, shuffle=False,
-                            num_workers=cfg.train.num_workers, pin_memory=True)
+    # Save the slide IDs that ended up in val (deduped) — needed for
+    # cascade eval reproducibility independent of numpy version drift.
+    slide_ids = bundle["slide_ids"]
+    val_slide_ids = sorted({slide_ids[int(i)] for i in val_idx})
+    train_slide_ids = sorted({slide_ids[int(i)] for i in train_idx})
+    (out_dir / "val_slides.json").write_text(json.dumps(val_slide_ids, indent=2))
+    (out_dir / "train_slides.json").write_text(json.dumps(train_slide_ids, indent=2))
+
+    nw = cfg.train.num_workers
+    pf = cfg.train.get("prefetch_factor", 4) if nw > 0 else None
+    pw = cfg.train.get("persistent_workers", True) if nw > 0 else False
+    train_loader = DataLoader(
+        train_ds, batch_size=cfg.train.batch_size, shuffle=True,
+        num_workers=nw, pin_memory=True,
+        prefetch_factor=pf, persistent_workers=pw,
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=cfg.train.batch_size, shuffle=False,
+        num_workers=nw, pin_memory=True,
+        prefetch_factor=pf, persistent_workers=pw,
+    )
     print(f"Batches/epoch: {len(train_loader)} train, {len(val_loader)} val")
 
     model = UNIv2PixelDecoder(
@@ -298,6 +315,15 @@ def main(cfg: DictConfig) -> None:
                 "val/dice_tls": va["dice_tls"], "val/dice_gc": va["dice_gc"],
                 "best_mDice": max(best_m, va["mDice"]),
             }, step=epoch)
+        # Always save last.pt (for resume / inference at any epoch).
+        torch.save({
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "epoch": epoch, "val_metrics": va,
+            "config": OmegaConf.to_container(cfg, resolve=True),
+        }, out_dir / "last.pt")
+
         if is_best:
             best_m, best_epoch = va["mDice"], epoch
             epochs_since_best = 0

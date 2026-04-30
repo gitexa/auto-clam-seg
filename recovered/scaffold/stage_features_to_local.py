@@ -69,7 +69,7 @@ def _copy_one(args: tuple[Path, Path]) -> dict:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--n_workers", type=int, default=8)
+    ap.add_argument("--n_workers", type=int, default=16)
     ap.add_argument("--dry_run", action="store_true")
     ap.add_argument("--limit", type=int, default=None,
                     help="Only stage the first N zarrs per cancer type "
