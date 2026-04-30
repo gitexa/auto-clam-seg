@@ -189,6 +189,22 @@ discard (`git reset --hard HEAD~1`).
 - **Conclusion**: **KEEP — +0.002 over v3.3d, +0.024 cumulative**.
   Sweep `gc_dice_weight ∈ {1, 2, 5}` → best at 1. New Stage 2 baseline.
 
+### v3.4a — v3.3g + min_tls_pixels=1024 patch label (KEEP)
+
+- **Hypothesis**: The 2.4× over-permissive patch label dilutes TLS
+  signal in training. Tightening from `tile.max() > 0` to
+  `(tile > 0).sum() >= 1024` (1.5 % coverage) should improve TLS
+  dice by removing low-density positives.
+- **Config**: v3.3g + `cache_path=tls_patch_dataset_min1024.pt`
+  (rebuilt cache, 59 323 patches vs 65 613 baseline, −10 %).
+- **Result**: best mDice=**0.7265** at ep7, early-stopped ep17.
+  **TLS dice 0.643 vs v3.3g 0.588 (+0.055)**, GC dice 0.900 (−0.016).
+  Run `19r8e6np`.
+- **Conclusion**: **KEEP — +0.001 over v3.3g, +0.025 cumulative**. The
+  TLS gain is the bigger story — numbers are now much closer to the
+  recovered Stage 2 profile (TLS 0.719, GC 0.710). Label tightening
+  validated. Pushing min_tls_pixels higher next.
+
 ---
 
 ## Next hypotheses (v3.3+)
