@@ -146,6 +146,18 @@ discard (`git reset --hard HEAD~1`).
 - **Conclusion**: **KEEP — +0.003 over v3.3a, +0.014 cumulative over
   v3.1**. Both classes improved. New Stage 2 baseline.
 
+### v3.3d — h=128 + class_weights=[1,5,3] (KEEP — new baseline)
+
+- **Hypothesis**: v3.3c showed TLS class weight boost helps. Push
+  further (5 vs 3) to extract more.
+- **Config**: `model=univ2_decoder_h128 train.class_weights=[1,5,3]`.
+- **Result**: best mDice=**0.7235** at ep8, early-stopped ep18. TLS
+  dice **0.589** (+0.017 over v3.3c), GC dice 0.900 (−0.021 vs v3.3c).
+  Run `ywvikpbr`.
+- **Conclusion**: **KEEP — +0.008 over v3.3c, +0.022 cumulative over
+  v3.1**. TLS gains outweighed the small GC drop. Trend monotonic so
+  far ([1,1,3]→[1,3,3]→[1,5,3] each gave a step up). Continue.
+
 ---
 
 ## Next hypotheses (v3.3+)
