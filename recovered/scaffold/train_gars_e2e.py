@@ -623,6 +623,121 @@ def main(cfg: DictConfig) -> None:
         (out_dir / "final_results.json").write_text(json.dumps(last_va, indent=2))
     print(f"\nDone. Best mDice={best_m:.4f} at epoch {best_epoch}")
     print(f"Checkpoint: {out_dir / 'best_checkpoint.pt'}")
+
+    # Full-slide eval: load best checkpoint, decode ALL patches per val
+    # slide (no sampling), compute slide-level dice + counting metrics.
+    # This is the honest deployment-regime evaluation.
+    print("\n=== Full-slide eval (decoding ALL patches per val slide) ===")
+    ckpt = torch.load(out_dir / "best_checkpoint.pt", map_location="cpu", weights_only=False)
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.eval()
+
+    from scipy.ndimage import label
+    bs = cfg.train.decode_batch_size
+    fs_slides = []
+    t0 = time.time()
+    with torch.no_grad():
+        for idx in range(len(val_ds)):
+            batch = val_ds[idx]
+            features_v = batch["features"].to(device)
+            edge_index_v = batch["edge_index"].to(device)
+            coords_v = batch["coords"].numpy() if hasattr(batch["coords"], "numpy") else np.asarray(batch["coords"])
+            mask_full = batch["mask"][0]  # (H_grid_up, W_grid_up)
+            short_id = batch["slide_id"].split(".")[0]
+
+            graph_feat_v = model.graph_context(features_v, edge_index_v)
+            n_v = features_v.shape[0]
+            pred_per_patch = np.zeros(n_v, dtype=np.int64)
+            for s in range(0, n_v, bs):
+                f_v = features_v[s : s + bs]
+                g_v = graph_feat_v[s : s + bs]
+                logits = model.decode_patches(f_v, g_v)
+                argmax = logits.argmax(dim=1).cpu().numpy()
+                for k in range(argmax.shape[0]):
+                    tile = argmax[k]
+                    if (tile == 2).any():
+                        pred_per_patch[s + k] = 2
+                    elif (tile == 1).any():
+                        pred_per_patch[s + k] = 1
+
+            # Build slide-level patch grids (predicted + ground truth).
+            gx = (coords_v[:, 0] / cfg.train.patch_size).astype(np.int64)
+            gy = (coords_v[:, 1] / cfg.train.patch_size).astype(np.int64)
+            gx -= gx.min(); gy -= gy.min()
+            H, W = int(gy.max()) + 1, int(gx.max()) + 1
+            pred_grid = np.zeros((H, W), dtype=np.int64)
+            for i in range(n_v):
+                pred_grid[gy[i], gx[i]] = pred_per_patch[i]
+            # GT grid: each patch's mask cell at upsampled resolution.
+            u = cfg.train.upsample_factor
+            gt_grid = np.zeros((H, W), dtype=np.int64)
+            mask_np = mask_full.numpy() if hasattr(mask_full, "numpy") else np.asarray(mask_full)
+            for i in range(n_v):
+                cell = mask_np[gy[i] * u : (gy[i] + 1) * u,
+                               gx[i] * u : (gx[i] + 1) * u]
+                if (cell == 2).any():
+                    gt_grid[gy[i], gx[i]] = 2
+                elif (cell == 1).any():
+                    gt_grid[gy[i], gx[i]] = 1
+
+            # Per-class dice on the slide-level grid.
+            def _dice(p, t, c, eps=1e-6):
+                pp = (p == c); tt = (t == c)
+                inter = float((pp & tt).sum())
+                denom = float(pp.sum() + tt.sum())
+                return (2 * inter + eps) / (denom + eps) if denom > 0 else 0.0
+            tls_d = _dice(pred_grid, gt_grid, 1)
+            gc_d = _dice(pred_grid, gt_grid, 2)
+            n_tls_pred = int(label(pred_grid == 1)[1])
+            n_gc_pred = int(label(pred_grid == 2)[1])
+            n_tls_true = int(label(gt_grid == 1)[1])
+            n_gc_true = int(label(gt_grid == 2)[1])
+            gt_meta = gt_counts.get(short_id, (n_tls_true, n_gc_true))
+            fs_slides.append({
+                "slide_id": short_id, "tls_dice": tls_d, "gc_dice": gc_d,
+                "pred_n_tls": n_tls_pred, "pred_n_gc": n_gc_pred,
+                "gt_n_tls": gt_meta[0], "gt_n_gc": gt_meta[1],
+                "n_patches": n_v,
+            })
+            if (idx + 1) % 20 == 0:
+                print(f"  [{idx + 1}/{len(val_ds)}] processed")
+
+    elapsed = time.time() - t0
+    if fs_slides:
+        from scipy.stats import spearmanr
+        from sklearn.metrics import mean_absolute_error
+        tls_dices = [r["tls_dice"] for r in fs_slides]
+        gc_dices = [r["gc_dice"] for r in fs_slides]
+        tls_sp = float(spearmanr([r["gt_n_tls"] for r in fs_slides],
+                                  [r["pred_n_tls"] for r in fs_slides]).statistic)
+        gc_sp = float(spearmanr([r["gt_n_gc"] for r in fs_slides],
+                                 [r["pred_n_gc"] for r in fs_slides]).statistic) \
+                 if any(r["gt_n_gc"] for r in fs_slides) else 0.0
+        tls_mae = float(mean_absolute_error([r["gt_n_tls"] for r in fs_slides],
+                                             [r["pred_n_tls"] for r in fs_slides]))
+        gc_mae = float(mean_absolute_error([r["gt_n_gc"] for r in fs_slides],
+                                            [r["pred_n_gc"] for r in fs_slides]))
+        fs_results = {
+            "n_slides": len(fs_slides),
+            "tls_dice": float(np.mean(tls_dices)),
+            "gc_dice": float(np.mean(gc_dices)),
+            "mDice_tls_gc": float((np.mean(tls_dices) + np.mean(gc_dices)) / 2),
+            "tls_count_sp": tls_sp, "gc_count_sp": gc_sp,
+            "tls_count_mae": tls_mae, "gc_count_mae": gc_mae,
+            "elapsed_s": elapsed,
+        }
+        print(f"\nFull-slide eval ({len(fs_slides)} slides, {elapsed:.0f}s):")
+        print(f"  TLS dice (slide-level): {fs_results['tls_dice']:.4f}")
+        print(f"  GC dice (slide-level):  {fs_results['gc_dice']:.4f}")
+        print(f"  TLS count Spearman:     {tls_sp:.3f}  MAE: {tls_mae:.2f}")
+        print(f"  GC count Spearman:      {gc_sp:.3f}  MAE: {gc_mae:.2f}")
+        (out_dir / "full_slide_eval.json").write_text(json.dumps(fs_results, indent=2))
+        (out_dir / "full_slide_per_slide.json").write_text(json.dumps(fs_slides, indent=2))
+        if run is not None:
+            for k, v in fs_results.items():
+                if isinstance(v, (int, float)):
+                    run.summary[f"fs/{k}"] = v
+
     if run is not None:
         run.summary["best_mDice"] = best_m
         run.summary["best_epoch"] = best_epoch
