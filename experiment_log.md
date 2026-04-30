@@ -121,6 +121,18 @@ discard (`git reset --hard HEAD~1`).
 - **Conclusion**: KEEP. **+0.011 mDice over baseline 0.7012**. New
   Stage 2 baseline.
 
+### v3.3b — h=128 + gc_dice_weight=5 (DISCARD)
+
+- **Hypothesis**: Boost the GC dice term to push GC dice further. GC
+  was already 0.90 in v3.3a; if it can hit 0.95, mDice climbs.
+- **Config**: `model=univ2_decoder_h128 train.gc_dice_weight=5.0`.
+- **Result**: best mDice=0.6822 at ep10, early-stopped ep20. GC dice
+  oscillated 0.62-0.86 (more volatile than v3.3a), TLS dice stayed
+  ~0.52. Run `17lu4cc0`.
+- **Conclusion**: DISCARD. **−0.030 mDice vs v3.3a baseline**. Higher
+  gc_dice_weight de-stabilises GC and doesn't compensate elsewhere.
+  Bottleneck appears to be TLS dice (~0.53), not GC (~0.85).
+
 ---
 
 ## Next hypotheses (v3.3+)
