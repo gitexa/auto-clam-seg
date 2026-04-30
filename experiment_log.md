@@ -44,11 +44,17 @@ GC pixel-dice 0.71 is the headline win — closes the v2.0 gap from 0.
 - **Hypothesis**: Re-implementation reproduces recovered F1 ≈ 0.561.
 - **Config**: `model=gatv2_3hop` (default), `train.lr=1e-3`,
   `train.pos_weight=5`, `train.epochs=50`, `train.patience=10`,
-  `train.upsample_factor=4`. Local SSD zarrs.
-- **Status**: in progress — ep7 F1 = 0.637 (BEST=0.648 at ep6),
-  val_selected dropping 26k → 12k (model becoming more selective).
-- **Result**: TBD on completion.
-- **Conclusion**: TBD.
+  `train.upsample_factor=4`, async DataLoader (4 workers, prefetch=2,
+  persistent), local SSD zarrs.
+- **Result**: best F1 = 0.646 at ep 11; early-stopped at ep 21.
+  88 min wall-clock total, 4.2 min/epoch (~30 % faster than the
+  pre-prefetch run thanks to async slide loading).
+  Run dir `gars_stage1_v3.0_gatv2_3hop_20260430_002624`. Wandb
+  `eufxm1u9`. **+15 % over recovered best (0.561)** — split drift
+  inflates the absolute number (val has 2.4× more TLS-positives).
+- **Conclusion**: KEEP. Architecture rebuild verified end-to-end. Use
+  this checkpoint for v3.2 cascade eval and as the Stage 1 baseline
+  for autoresearch.
 
 ### v3.1 — Stage 2 UNI-v2 decoder reproduction
 
