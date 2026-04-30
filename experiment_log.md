@@ -133,6 +133,19 @@ discard (`git reset --hard HEAD~1`).
   gc_dice_weight de-stabilises GC and doesn't compensate elsewhere.
   Bottleneck appears to be TLS dice (~0.53), not GC (~0.85).
 
+### v3.3c — h=128 + class_weights=[1,3,3] (KEEP — new baseline)
+
+- **Hypothesis**: TLS dice is the bottleneck. The default
+  `class_weights=[1,1,3]` undervalues TLS in the per-pixel CE term.
+  Boosting TLS to match GC (=3) should improve TLS without
+  sacrificing GC.
+- **Config**: `model=univ2_decoder_h128 train.class_weights=[1,3,3]`.
+- **Result**: best mDice=**0.7152** at ep3, early-stopped ep13. TLS
+  dice **0.572** (vs v3.3a 0.529, **+0.043**), GC dice 0.921 (vs
+  v3.3a 0.908, **+0.013**). Run `0r7t2ddp`.
+- **Conclusion**: **KEEP — +0.003 over v3.3a, +0.014 cumulative over
+  v3.1**. Both classes improved. New Stage 2 baseline.
+
 ---
 
 ## Next hypotheses (v3.3+)
