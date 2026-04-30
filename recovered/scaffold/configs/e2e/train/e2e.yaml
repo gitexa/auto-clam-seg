@@ -1,0 +1,15 @@
+# @package train
+# v3.5b config (recovered + v3.3/v3.4 lessons)
+lr: 3.0e-4
+weight_decay: 1.0e-4
+epochs: 30
+patience: 10
+warmup_epochs: 3
+class_weights: [1.0, 5.0, 3.0]      # v3.3d finding (was [1,1,3] in recovered)
+gc_dice_weight: 1.0                  # v3.3g finding (was 2 in recovered)
+bg_decode_ratio: 0.5                 # per slide, sample bg patches at this fraction
+decode_batch_size: 32                # patches per forward pass
+max_patches_per_slide: 200           # cap per slide (positives + bg subsample)
+val_frac: 0.157
+upsample_factor: 4
+patch_size: 256

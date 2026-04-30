@@ -1,0 +1,27 @@
+# Top-level e2e config.
+defaults:
+  - model: graph_enriched
+  - train: e2e
+  - _self_
+
+stage: e2e
+label: v3.5b_graph_enriched
+seed: 42
+out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
+use_local_ssd: auto
+
+wandb:
+  enabled: true
+  project: tls-pixel-seg
+  entity: null
+  mode: ${oc.env:WANDB_MODE,online}
+  tags: [v3, gars, e2e]
+
+hydra:
+  run:
+    dir: ${out_root}/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+  sweep:
+    dir: ${out_root}/multirun/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+    subdir: ${hydra.job.num}_${hydra.job.override_dirname}
+  job:
+    chdir: false

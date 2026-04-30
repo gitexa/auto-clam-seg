@@ -1,0 +1,10 @@
+# @package model
+# GraphEnrichedDecoder - 10.15M params (verified strict-load against qy3pj74h)
+in_dim: 1536
+graph_hidden_dim: 256
+n_hops: 3
+gat_heads: 4
+spatial_bottleneck: 512
+hidden_channels: 64
+spatial_size: 16
+n_classes: 3
