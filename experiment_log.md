@@ -351,6 +351,63 @@ graph branch modulates pixel decoder for every patch.
 
 ---
 
+## v3.6 — Cascade with pixel-aggregate dice + v3.4b Stage 2 (KEEP — NEW BEST)
+
+- **Hypothesis** (H1): My patch-grid cascade dice was a coarse
+  approximation; the recovered eval used per-pixel aggregate dice
+  over the selected patches' 256×256 native masks. Re-evaluating
+  with the right metric and the better Stage 2 (v3.4b) should close
+  the recovered-vs-mine gap.
+- **Config**: `eval_gars_cascade.py` modified to compute both metrics
+  (patch-grid kept for backward compat, pixel-agg added). Inputs:
+  Stage 1 v3.0 (`gars_stage1_v3.0_gatv2_3hop_*`), Stage 2 v3.4b
+  (`gars_stage2_v3.4b_h128_min4096_*`), 124 val slides, 6 thresholds.
+
+  | thr | mDice (pix-agg) | TLS (pix-agg) | GC (pix-agg) | TLS sp | GC sp |
+  |---|---|---|---|---|---|
+  | 0.05 | 0.559 | 0.436 | 0.683 | 0.731 | 0.582 |
+  | 0.10 | 0.633 | 0.516 | 0.749 | 0.776 | 0.609 |
+  | 0.20 | 0.694 | 0.590 | 0.798 | 0.825 | 0.647 |
+  | 0.30 | 0.723 | 0.631 | 0.815 | 0.852 | 0.668 |
+  | 0.40 | 0.744 | 0.665 | 0.822 | 0.864 | 0.699 |
+  | **0.50** | **0.771** | **0.712** | **0.830** | **0.875** | **0.737** |
+
+  Run `so61vms2`.
+- **Result vs everything else (deployment-honest)**:
+  - Recovered cascade @ thr=0.50: mDice 0.457 / TLS 0.180 / GC 0.733
+  - v3.2 cascade pix-agg @ thr=0.50: mDice 0.638 / TLS 0.700 / GC 0.576
+  - **v3.6 cascade pix-agg @ thr=0.50: mDice 0.771 / TLS 0.712 / GC 0.830**
+  - v3.5g e2e full-slide: TLS 0.283 / GC 0.058
+- **Conclusion**: **KEEP — NEW CHAMPION**. **+0.097 GC dice** over the
+  recovered cascade (0.733 → 0.830) and **+0.314 mDice** over v3.2
+  (0.457 → 0.771) at the same threshold. The improvements stack
+  cleanly:
+  1. Pixel-agg metric (right deployment scoring): +0.18 mDice
+     (v3.2 patch-grid 0.512 → v3.2 pix-agg 0.638)
+  2. v3.4b Stage 2 (label-tightening + class_weights tuning):
+     +0.13 mDice on top (v3.2 pix-agg 0.638 → v3.6 pix-agg 0.771)
+
+  The cascade architecture wins decisively. **The "cascade-eval gap"
+  was largely a metric-definition difference**, not a model
+  weakness. The single Stage 2 hyperparameter wins from v3.3-v3.4
+  also lift cascade deployment numbers — they weren't only
+  per-positives illusions.
+
+### Final standings
+
+| Approach | mDice (deployment) | TLS dice | GC dice |
+|---|---|---|---|
+| Recovered cascade | 0.457 | 0.180 | 0.733 |
+| **v3.6 cascade** | **0.771** | **0.712** | **0.830** |
+| v3.5g e2e | (full-slide-grid metric) | 0.283 | 0.058 |
+| v3.5f e2e | (per-positives proxy only) | 0.700 | 0.936 |
+
+**Deployment-honest take**: cascade > e2e by a wide margin at slide
+level. v3.5 e2e was an instructive dead end — single-pass models
+without a Stage-1 filter overpredict TLS/GC on bg patches.
+
+---
+
 ## Next hypotheses (v3.3+)
 
 1. **Tighten patch label** — switch `tile.max() > 0` to

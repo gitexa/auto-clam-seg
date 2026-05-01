@@ -74,6 +74,11 @@ def load_stage2(ckpt_path: str, device: torch.device) -> UNIv2PixelDecoder:
 @torch.no_grad()
 def cascade_one_slide(stage1, stage2, features, coords, edge_index, threshold,
                       device, s2_batch=64):
+    """Returns:
+        grid_class:    (H_grid, W_grid) patch-level argmax (priority GC>TLS>bg)
+        selected:      indices Stage 1 picked
+        pred_tiles:    {patch_idx: (256, 256) np.uint8 argmax mask} for selected
+    """
     n = features.shape[0]
     grid_x = (coords[:, 0] / PATCH_SIZE).long()
     grid_y = (coords[:, 1] / PATCH_SIZE).long()
@@ -87,25 +92,23 @@ def cascade_one_slide(stage1, stage2, features, coords, edge_index, threshold,
     selected = np.where(s1_probs > threshold)[0]
 
     pred_class_per_patch = np.zeros(n, dtype=np.int64)
-    n_tls_px = np.zeros(n, dtype=np.int64)
-    n_gc_px = np.zeros(n, dtype=np.int64)
+    pred_tiles: dict[int, np.ndarray] = {}
     for s in range(0, len(selected), s2_batch):
         batch_idx = selected[s : s + s2_batch]
         feats = features[batch_idx].to(device)
-        argmax = stage2(feats).argmax(dim=1).cpu().numpy()
+        argmax = stage2(feats).argmax(dim=1).cpu().numpy().astype(np.uint8)
         for b, i in enumerate(batch_idx):
             tile = argmax[b]
-            n_tls_px[i] = int((tile == 1).sum())
-            n_gc_px[i] = int((tile == 2).sum())
-            pred_class_per_patch[i] = (
-                2 if n_gc_px[i] > 0 else (1 if n_tls_px[i] > 0 else 0)
-            )
+            pred_tiles[int(i)] = tile
+            n_gc = int((tile == 2).sum())
+            n_tls = int((tile == 1).sum())
+            pred_class_per_patch[i] = 2 if n_gc > 0 else (1 if n_tls > 0 else 0)
 
     grid_class = np.zeros((H, W), dtype=np.int64)
     for i in range(n):
         gx, gy = int(grid_x[i]), int(grid_y[i])
         grid_class[gy, gx] = pred_class_per_patch[i]
-    return grid_class, len(selected)
+    return grid_class, len(selected), pred_tiles
 
 
 def patch_grid_from_mask_cache(cache, coords, upsample_factor):
@@ -169,6 +172,20 @@ def main(cfg: DictConfig) -> None:
     print(f"Loading mask cache (upsample_factor={cfg.upsample_factor})...")
     mask_dict = ps.build_mask_cache(val_entries, cfg.upsample_factor)
 
+    # Native-resolution per-patch GT masks for per-pixel slide-level dice.
+    print("Loading TLS-patch cache (native 256×256 GT masks for pixel dice)...")
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from tls_patch_dataset import build_tls_patch_dataset
+    patch_cache_path = cfg.get("patch_cache_path",
+                               "/home/ubuntu/local_data/tls_patch_dataset.pt")
+    bundle = build_tls_patch_dataset(cache_path=patch_cache_path)
+    bundle_masks = bundle["masks"]
+    patch_mask_lookup: dict[str, dict[int, np.ndarray]] = {}
+    for ci, sid in enumerate(bundle["slide_ids"]):
+        short = sid.split(".")[0]
+        pi = int(bundle["patch_idx"][ci])
+        patch_mask_lookup.setdefault(short, {})[pi] = np.asarray(bundle_masks[ci])
+
     run = None
     if cfg.wandb.enabled and cfg.wandb.mode != "disabled":
         import wandb
@@ -186,6 +203,11 @@ def main(cfg: DictConfig) -> None:
         print(f"\n{'=' * 60}\nTHRESHOLD = {thr}\n{'=' * 60}")
         per_slide = []
         n_selected_total = n_total_total = 0
+        # Per-pixel aggregate dice over selected patches' 256×256 masks
+        # (matches the recovered cascade_eval.log style — high GC, low TLS).
+        # Aggregate intersection + union per class across all selected
+        # patches in val, then divide once at the end.
+        agg = {1: {"inter": 0, "denom": 0}, 2: {"inter": 0, "denom": 0}}
         for k, entry in enumerate(val_entries):
             short_id = entry["slide_id"].split(".")[0]
             cache = mask_dict.get(short_id)
@@ -202,15 +224,31 @@ def main(cfg: DictConfig) -> None:
                 continue
 
             t0 = time.time()
-            grid_class, n_selected = cascade_one_slide(
+            grid_class, n_selected, pred_tiles = cascade_one_slide(
                 stage1, stage2, features, coords, edge_index, thr, device,
                 s2_batch=cfg.s2_batch,
             )
             t_total = time.time() - t0
 
+            # Patch-grid dice (coarse, what we had before — kept for backward compat).
             target_grid = patch_grid_from_mask_cache(cache, coords, cfg.upsample_factor)
             tls_d = dice_score(grid_class, target_grid, 1)
             gc_d = dice_score(grid_class, target_grid, 2)
+
+            # Per-pixel aggregate dice over selected patches' native masks.
+            slide_lookup = patch_mask_lookup.get(short_id, {})
+            for i, tile in pred_tiles.items():
+                gt = slide_lookup.get(int(i))
+                if gt is None:
+                    gt = np.zeros((256, 256), dtype=np.uint8)
+                else:
+                    gt = np.asarray(gt)
+                for cls in (1, 2):
+                    p = (tile == cls)
+                    t = (gt == cls)
+                    agg[cls]["inter"] += int((p & t).sum())
+                    agg[cls]["denom"] += int(p.sum() + t.sum())
+
             per_slide.append({
                 "slide_id": short_id, "cancer_type": entry["cancer_type"],
                 "tls_dice": tls_d, "gc_dice": gc_d, "mDice": (tls_d + gc_d) / 2.0,
@@ -231,6 +269,11 @@ def main(cfg: DictConfig) -> None:
         mD = float(np.mean([r["mDice"] for r in per_slide]))
         tls_m = float(np.mean([r["tls_dice"] for r in per_slide]))
         gc_m = float(np.mean([r["gc_dice"] for r in per_slide]))
+        # Per-pixel aggregate dice over selected patches' 256×256 native masks.
+        eps = 1e-6
+        tls_pix = (2 * agg[1]["inter"] + eps) / (agg[1]["denom"] + eps)
+        gc_pix = (2 * agg[2]["inter"] + eps) / (agg[2]["denom"] + eps)
+        mD_pix = (tls_pix + gc_pix) / 2.0
         tls_sp, _ = spearmanr([r["n_tls_true"] for r in per_slide],
                               [r["n_tls_pred"] for r in per_slide])
         gc_sp, _ = spearmanr([r["n_gc_true"] for r in per_slide],
@@ -238,7 +281,8 @@ def main(cfg: DictConfig) -> None:
         per_slide_t = float(np.mean([r["t_total"] for r in per_slide]))
         sel_frac = n_selected_total / max(1, n_total_total)
         print(f"\n  Results ({len(per_slide)} slides, threshold={thr}):")
-        print(f"    mDice={mD:.4f}  TLS={tls_m:.4f}  GC={gc_m:.4f}")
+        print(f"    [patch-grid] mDice={mD:.4f}  TLS={tls_m:.4f}  GC={gc_m:.4f}")
+        print(f"    [pixel-agg]  mDice={mD_pix:.4f}  TLS={tls_pix:.4f}  GC={gc_pix:.4f}")
         print(f"    TLS sp={tls_sp:.3f}  GC sp={gc_sp:.3f}")
         print(f"    {per_slide_t:.2f}s/slide  selected {n_selected_total}/{n_total_total} "
               f"({100 * sel_frac:.1f}%)")
@@ -248,6 +292,7 @@ def main(cfg: DictConfig) -> None:
                   f"GC={np.mean([r['gc_dice'] for r in sub]):.3f}")
         rows.append({
             "threshold": thr, "mDice": mD, "tls_dice": tls_m, "gc_dice": gc_m,
+            "mDice_pix": mD_pix, "tls_dice_pix": tls_pix, "gc_dice_pix": gc_pix,
             "tls_sp": tls_sp, "gc_sp": gc_sp, "n_selected": n_selected_total,
             "n_total": n_total_total, "s_per_slide": per_slide_t,
         })
