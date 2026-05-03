@@ -417,7 +417,7 @@ from tls_patch_dataset import _process_one_slide
 
 for label, info in picks.items():
     e = info['entry']
-    res = _process_one_slide((e, ps.MASK_DIR))
+    res = _process_one_slide((e, ps.MASK_DIR, 1))  # min_tls_pixels=1
     if res is None:
         print(f'{label}: no TLS-positive patches'); continue
     n = res['features'].shape[0]
@@ -429,6 +429,248 @@ for label, info in picks.items():
           f'TLS-positive={n:>4} ({100*n/n_total:.1f}%)  '
           f'with TLS pixels={n_tls:>4}  '
           f'with GC pixels={n_gc:>4}')
+""")
+
+md("""## 6. GNCAF dataloader supervision check
+
+This is the load-bearing check for GNCAF training: the `(target_rgb,
+target_mask)` pairs returned by `GNCAFSlideDataset` are exactly what the
+model sees + computes cross-entropy loss against. We sample with a fixed
+seed so the indexing matches what a training run would see.
+
+For each slide we show three sampled targets. Each row has three panels:
+
+1. **`target_rgb`** — the 256×256 RGB tile fed to the encoder
+2. **`+ TLS overlay`** — same tile with TLS pixels (mask==1) shaded red
+3. **`+ TLS + GC overlay`** — same tile with TLS red and GC (mask==2) yellow
+
+Per-target stats below each row report TLS-pixel count and GC-pixel
+count for the 256×256 mask — these are the per-pixel CE-loss targets.""")
+
+code("""
+from gncaf_dataset import GNCAFSlideDataset, _normalise_rgb, IMAGENET_MEAN, IMAGENET_STD
+import matplotlib.patches as mpatches
+
+# Scales to show, ordered widest → narrowest. Last entry must be 256
+# (the model input).
+SCALES = [1024, 512, 256]
+
+
+def _read_centred_rgb(wsi_z, cx, cy, size):
+    '''Read a size×size RGB tile centred on (cx, cy). Pads white if it
+    runs off the slide edge.'''
+    h, w = wsi_z.shape[:2]
+    half = size // 2
+    x0 = max(cx - half, 0); x1 = min(cx - half + size, w)
+    y0 = max(cy - half, 0); y1 = min(cy - half + size, h)
+    tile = np.asarray(wsi_z[y0:y1, x0:x1])
+    out = np.full((size, size, 3), 255, dtype=tile.dtype)
+    px = max(half - cx, 0); py = max(half - cy, 0)
+    out[py:py + tile.shape[0], px:px + tile.shape[1]] = tile
+    return out
+
+
+def _read_centred_mask(mask_z, cx, cy, size):
+    h, w = mask_z.shape
+    half = size // 2
+    x0 = max(cx - half, 0); x1 = min(cx - half + size, w)
+    y0 = max(cy - half, 0); y1 = min(cy - half + size, h)
+    tile = np.asarray(mask_z[y0:y1, x0:x1])
+    out = np.zeros((size, size), dtype=tile.dtype)
+    px = max(half - cx, 0); py = max(half - cy, 0)
+    out[py:py + tile.shape[0], px:px + tile.shape[1]] = tile
+    return out
+
+
+def _draw_centre_box(ax, scale, model_size=256):
+    '''Outline the central model_size × model_size region on a wider crop.'''
+    if scale == model_size: return
+    half = scale // 2; m = model_size // 2
+    rect = mpatches.Rectangle((half - m, half - m), model_size, model_size,
+                              fill=False, edgecolor='lime', linewidth=1.5)
+    ax.add_patch(rect)
+
+
+def show_supervision_multiscale(entry, label, ds, n_targets=3):
+    sample = ds[picks_to_idx[label]]
+    coords_path = entry['zarr_path']
+    g = zarr.open(coords_path, mode='r')
+    coords = np.asarray(g['coords'][:], dtype=np.int64)
+    target_idx = sample['target_idx'].numpy()
+    masks_256 = sample['target_mask'].numpy()
+    K = min(n_targets, len(target_idx))
+
+    # Open WSI + mask once per slide.
+    wsi_path = ('/home/ubuntu/ahaas-persistent-std-tcga/slides_tif_/data/'
+                f'drive2/alex/tcga/slides_v2/tcga-{entry[\"cancer_type\"].lower()}/'
+                f'{entry[\"slide_id\"]}.tif')
+    mask_path = entry['mask_path']
+    wsi_z = zarr.open(tifffile.imread(wsi_path, aszarr=True, level=0), mode='r')
+    mask_z = zarr.open(tifffile.imread(mask_path, aszarr=True, level=0), mode='r')
+
+    n_rows = len(SCALES); n_cols = 3
+    for ti in range(K):
+        node = int(target_idx[ti])
+        x, y = int(coords[node, 0]), int(coords[node, 1])
+        cx, cy = x + 256 // 2, y + 256 // 2
+        m_at_size = {256: masks_256[ti]}
+        n_tls_256 = int((masks_256[ti] == 1).sum())
+        n_gc_256 = int((masks_256[ti] == 2).sum())
+
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(11, 11),
+                                  squeeze=False)
+        for ri, scale in enumerate(SCALES):
+            rgb = _read_centred_rgb(wsi_z, cx, cy, scale)
+            mask = (m_at_size.get(scale)
+                     if scale in m_at_size
+                     else _read_centred_mask(mask_z, cx, cy, scale))
+
+            n_tls = int((mask == 1).sum())
+            n_gc = int((mask == 2).sum())
+
+            row_label = ('MODEL INPUT (256)' if scale == 256
+                          else f'context {scale}×{scale}')
+            row_color = 'red' if scale == 256 else 'black'
+
+            # Col 0: RGB only
+            axes[ri, 0].imshow(rgb)
+            axes[ri, 0].set_title(f'{row_label}\\nRGB',
+                                    color=row_color, fontsize=10)
+            _draw_centre_box(axes[ri, 0], scale)
+            axes[ri, 0].axis('off')
+
+            # Col 1: + TLS overlay
+            ov_tls = np.zeros((scale, scale, 4), dtype=np.uint8)
+            ov_tls[mask == 1] = [255, 60, 60, 130]
+            axes[ri, 1].imshow(rgb)
+            axes[ri, 1].imshow(ov_tls, interpolation='nearest')
+            axes[ri, 1].set_title(f'+ TLS  •  TLS={n_tls}',
+                                    color=row_color, fontsize=10)
+            _draw_centre_box(axes[ri, 1], scale)
+            axes[ri, 1].axis('off')
+
+            # Col 2: + TLS + GC overlay
+            ov_full = np.zeros((scale, scale, 4), dtype=np.uint8)
+            ov_full[mask == 1] = [255, 60, 60, 110]
+            ov_full[mask == 2] = [255, 220, 0, 230]
+            axes[ri, 2].imshow(rgb)
+            axes[ri, 2].imshow(ov_full, interpolation='nearest')
+            axes[ri, 2].set_title(f'+ TLS + GC  •  TLS={n_tls}, GC={n_gc}',
+                                    color=row_color, fontsize=10)
+            _draw_centre_box(axes[ri, 2], scale)
+            axes[ri, 2].axis('off')
+
+        fig.suptitle(
+            f'{label}: {entry[\"slide_id\"][:35]}  •  target #{ti}  '
+            f'patch_idx={node}  •  256-px supervision: '
+            f'TLS={n_tls_256}/{256*256}px, GC={n_gc_256}px',
+            fontsize=11,
+        )
+        plt.tight_layout()
+        plt.show()
+
+
+# Build dataset over our 4 picked slides only — fast, no need to enumerate all.
+pick_entries = [info['entry'] for info in picks.values()]
+gncaf_ds = GNCAFSlideDataset(pick_entries, max_targets=8, neg_per_pos=1.0,
+                              rng_seed=42)
+picks_to_idx = {label: i for i, label in enumerate(picks.keys())}
+print(f'GNCAFSlideDataset built over {len(gncaf_ds)} slides; '
+      f'sampling targets with rng_seed=42 (fixed).')
+print(f'Per target: 3 scales (1024 / 512 / 256) × 3 cols (RGB / +TLS / +TLS+GC).')
+print(f'The 256-px row in red = the actual model input + CE supervision.\\n')
+
+for label, info in picks.items():
+    show_supervision_multiscale(info['entry'], label, gncaf_ds, n_targets=3)
+""")
+
+md("""## 6b. GC-positive supervision (explicit)
+
+GC patches are sparse (only ~3 in the LARGEST slide, 0 in BLCA/KIRC/LUSC
+of our small pick set), so the random target sampler rarely picks one.
+To verify GC supervision we explicitly find a GC-positive patch per slide
+(mask centre = 2) and render the same multi-scale grid. The 256-row
+should now show non-zero `GC=` pixel counts.""")
+
+code("""
+def find_gc_positive_patches(entry, max_results=2):
+    '''Scan a slide's coords and return patch indices whose 256x256 mask
+    region contains ANY GC pixel (==2). Returns (node_idx, x, y) list.'''
+    g = zarr.open(entry['zarr_path'], mode='r')
+    coords = np.asarray(g['coords'][:], dtype=np.int64)
+    mask_z = zarr.open(tifffile.imread(entry['mask_path'], aszarr=True, level=0),
+                        mode='r')
+    mh, mw = mask_z.shape
+    found = []
+    for i, (x, y) in enumerate(coords):
+        x0, y0 = int(x), int(y)
+        x1 = min(x0 + 256, mw); y1 = min(y0 + 256, mh)
+        if x1 <= x0 or y1 <= y0: continue
+        tile = np.asarray(mask_z[y0:y1, x0:x1])
+        if (tile == 2).any():
+            found.append((i, x0, y0))
+            if len(found) >= max_results: break
+    return found
+
+
+def show_multiscale_at_coord(entry, label, node_idx, x, y, header):
+    cx, cy = x + 128, y + 128
+    wsi_path = ('/home/ubuntu/ahaas-persistent-std-tcga/slides_tif_/data/'
+                f'drive2/alex/tcga/slides_v2/tcga-{entry[\"cancer_type\"].lower()}/'
+                f'{entry[\"slide_id\"]}.tif')
+    wsi_z = zarr.open(tifffile.imread(wsi_path, aszarr=True, level=0), mode='r')
+    mask_z = zarr.open(tifffile.imread(entry['mask_path'], aszarr=True, level=0),
+                       mode='r')
+
+    n_rows = len(SCALES); n_cols = 3
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(11, 11), squeeze=False)
+    for ri, scale in enumerate(SCALES):
+        rgb = _read_centred_rgb(wsi_z, cx, cy, scale)
+        mask = _read_centred_mask(mask_z, cx, cy, scale)
+        n_tls = int((mask == 1).sum()); n_gc = int((mask == 2).sum())
+        row_label = ('MODEL INPUT (256)' if scale == 256
+                      else f'context {scale}×{scale}')
+        row_color = 'red' if scale == 256 else 'black'
+
+        axes[ri, 0].imshow(rgb)
+        axes[ri, 0].set_title(f'{row_label}\\nRGB', color=row_color, fontsize=10)
+        _draw_centre_box(axes[ri, 0], scale)
+        axes[ri, 0].axis('off')
+
+        ov_tls = np.zeros((scale, scale, 4), dtype=np.uint8)
+        ov_tls[mask == 1] = [255, 60, 60, 130]
+        axes[ri, 1].imshow(rgb); axes[ri, 1].imshow(ov_tls, interpolation='nearest')
+        axes[ri, 1].set_title(f'+ TLS  •  TLS={n_tls}', color=row_color, fontsize=10)
+        _draw_centre_box(axes[ri, 1], scale)
+        axes[ri, 1].axis('off')
+
+        ov_full = np.zeros((scale, scale, 4), dtype=np.uint8)
+        ov_full[mask == 1] = [255, 60, 60, 110]
+        ov_full[mask == 2] = [255, 220, 0, 230]
+        axes[ri, 2].imshow(rgb); axes[ri, 2].imshow(ov_full, interpolation='nearest')
+        axes[ri, 2].set_title(f'+ TLS + GC  •  TLS={n_tls}, GC={n_gc}',
+                                color=row_color, fontsize=10)
+        _draw_centre_box(axes[ri, 2], scale)
+        axes[ri, 2].axis('off')
+    fig.suptitle(header, fontsize=11)
+    plt.tight_layout()
+    plt.show()
+
+
+print('Searching for GC-positive patches in each picked slide...')
+n_shown = 0
+for label, info in picks.items():
+    e = info['entry']
+    gc_hits = find_gc_positive_patches(e, max_results=1)
+    if not gc_hits:
+        print(f'  {label}: no GC-positive patch — skipping')
+        continue
+    node_idx, x, y = gc_hits[0]
+    header = (f'GC-POSITIVE  •  {label}: {e[\"slide_id\"][:35]}  •  '
+              f'patch_idx={node_idx}  (mask centre = 2)')
+    show_multiscale_at_coord(e, label, node_idx, x, y, header)
+    n_shown += 1
+print(f'Showed {n_shown}/{len(picks)} GC-positive supervision grids.')
 """)
 
 md("""## 7. Summary
