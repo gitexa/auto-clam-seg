@@ -39,6 +39,7 @@ slide-level pixel-aggregate where applicable; per-positives where stated).
 | Architecture | Params | Pix-agg mDice | TLS pix | GC pix | TLS sp | GC sp | GC MAE | RGB? | s/slide |
 |---|---|---|---|---|---|---|---|---|---|
 | **v3.37 RegionDecoder (champ)** | **14.5 M** | **0.845** | **0.822** | **0.868** | 0.876 | **0.934** | **0.28** | yes (regions only) | 2.65 |
+| v3.52 RegionDecoder + bg-only | 14.5 M | 0.827 | 0.804 | 0.851 | 0.863 | 0.922 | 0.46 | yes (regions only) | 2.65 |
 | v3.13 cascade | 11.6 M | 0.784 | 0.722 | 0.846 | 0.874 | 0.887 | 0.39 | no | 0.18 |
 | v3.22 patchcls (no decoder) | **1.3 M** | n/a | n/a | n/a | 0.873 | 0.824 | n/a | no | ~0.05 |
 | v3.26 patchcls→cascade hybrid | 11.6 M | 0.777 | 0.709 | 0.845 | 0.879 | 0.831 | 0.43 | no | 0.13 |
@@ -148,6 +149,38 @@ The cascade closes this gap by **explicit gatekeeping** at deployment
 patch-level calibration. Bg-only training is the right move for
 *patch-level* downstream tasks (counting, localization), but it's not
 sufficient to close the GNCAF → cascade slide-level pixel-dice gap.
+
+### v3.52 — bg-only at cascade Stage 2 (negative result)
+
+The same bg-only zero-mask supervision that improved v3.51 GNCAF's
+patch-grid metrics was applied to the v3.37 RegionDecoder cascade
+(Stage 2). The augmented patch cache added 2004 bg patches (12 per
+bg-only train slide × 167 slides → 53,833 total patches). Training
+schedule and architecture identical to v3.37.
+
+| Metric | v3.37 | v3.52 (+ bg) | Δ |
+|---|---|---|---|
+| pixel-agg mDice | **0.845** | 0.827 | −0.018 |
+| TLS dice (pix) | **0.822** | 0.804 | −0.018 |
+| GC dice (pix) | **0.868** | 0.851 | −0.017 |
+| TLS Spearman | **0.876** | 0.863 | −0.013 |
+| GC Spearman | **0.934** | 0.922 | −0.012 |
+| GC MAE | **0.28** | 0.46 | +0.18 |
+
+Bg-only training **slightly hurts** every cascade metric. **Why**:
+Stage 2 only runs on Stage-1-positive patches at deployment (~0.7 % of
+patches per slide). Adding bg-only patches to Stage 2's training
+distribution exposes it to a regime it almost never sees at inference,
+so the gradient signal goes toward calibrating an unused output mode.
+The cascade's Stage 1 GAT already does the job of filtering bg patches;
+v3.51's improvement came precisely because GNCAF lacked any such gating
+and had to learn it from data. **The cascade subsumes the role
+bg-only training played in GNCAF.**
+
+Conclusion: v3.37 remains champion. Bg-only training is the right
+intervention for any model that decodes every patch at deployment
+(GNCAF, plain pixel decoders) but is counterproductive for a
+two-stage cascade with explicit selection.
 
 ### Cascade + GNCAF ensemble (no-op, dominated)
 
