@@ -14,6 +14,9 @@ region_mode: false             # v3.37: RegionDecoder (RGB+UNI+graph) over 3x3 c
 stage2_region: null            # RegionDecoder ckpt
 region_s2_batch: 8             # 768x768 decoder batch (heavier than nbhd: ResNet activations)
 limit_slides: null             # smoke flag — eval only first N val slides
+use_test_split: false          # if true: eval on held-out test patients (the 170)
+slide_offset: 0                # shard support for parallel eval
+slide_stride: 1
 
 thresholds: [0.05, 0.10, 0.20, 0.30, 0.40, 0.50]
 upsample_factor: 4

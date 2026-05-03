@@ -524,12 +524,21 @@ def main(cfg: DictConfig) -> None:
 
     ps.set_seed(cfg.seed)
     entries = ps.build_slide_entries()
-    folds_pair, _test = ps.create_splits(entries, k_folds=1, seed=cfg.seed)
-    val_entries = folds_pair[0]
-    val_entries = [e for e in val_entries if e.get("mask_path") is not None]
+    folds_pair, test_entries = ps.create_splits(entries, k_folds=1, seed=cfg.seed)
+    if cfg.get("use_test_split", False):
+        val_entries = [e for e in test_entries if e.get("mask_path") is not None]
+        print(f"Using TEST split: {len(val_entries)} slides with masks")
+    else:
+        val_entries = folds_pair[0]
+        val_entries = [e for e in val_entries if e.get("mask_path") is not None]
     if cfg.get("limit_slides"):
         val_entries = val_entries[: int(cfg.limit_slides)]
         print(f"  limit_slides={cfg.limit_slides}")
+    offset = int(cfg.get("slide_offset", 0))
+    stride = int(cfg.get("slide_stride", 1))
+    if stride > 1:
+        val_entries = val_entries[offset::stride]
+        print(f"Sharded: offset={offset} stride={stride} → {len(val_entries)} slides")
     print(f"Val: {len(val_entries)} slides with masks\n")
 
     print(f"Loading mask cache (upsample_factor={cfg.upsample_factor})...")

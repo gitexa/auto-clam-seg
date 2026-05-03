@@ -1,0 +1,36 @@
+defaults:
+  - model: region_h64
+  - train: region
+  - _self_
+
+stage: region
+label: v3.52_region_bgneg
+seed: 42
+out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
+
+stage1: /home/ubuntu/ahaas-persistent-std-tcga/experiments/gars_stage1_v3.8_gatv2_5hop_20260501_043445/best_checkpoint.pt
+
+# v3.52: same architecture and hyperparams as v3.37, but augmented patch
+# cache with 2004 bg patches (12/slide × 167 bg-only train slides) so the
+# RegionDecoder sees explicit zero-mask supervision.
+data:
+  cache_path: /home/ubuntu/local_data/tls_patch_dataset_min4096_with_bgneg.pt
+  max_windows_per_slide: 64
+  tile_clusters: true
+  stride: 2
+
+wandb:
+  enabled: true
+  project: tls-pixel-seg
+  entity: null
+  mode: ${oc.env:WANDB_MODE,online}
+  tags: [v3, region, cascade-v2, bg-only-slides]
+
+hydra:
+  run:
+    dir: ${out_root}/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+  sweep:
+    dir: ${out_root}/multirun/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+    subdir: ${hydra.job.num}_${hydra.job.override_dirname}
+  job:
+    chdir: false

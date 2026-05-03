@@ -98,6 +98,22 @@ TransUNet was trained for 23 epochs and its per-positives matches
 paper expectations. The architecture is just inherently less suited
 to slide-level deployment than the cascade.
 
+### Test set status
+
+The 170-patient held-out test split (160 mask-having slides, ~20 % of
+the cohort) has been preserved untouched throughout — no model has seen
+these slides during training, validation, or hyperparameter tuning.
+Final test-set evaluation of the v3.37 champion is **blocked by data
+availability**: neither TIF nor SVS files are staged for the test
+slides on this machine (only the 124 fold-0 val slides + 481 train
+mask-slides + 167 train negatives have local TIFs). All numbers in
+this document are fold-0 patient-stratified val results.
+
+To unblock test eval: download SVS files for the 170 test patients
+from TCGA GDC, run `save_image_at_spacing.py` to convert to TIF
+(~3-5 min/slide × 160 = 8-13 h), then run
+`eval_gars_cascade.py ... use_test_split=true slide_offset=N slide_stride=4`.
+
 ### v3.51 — bg-only training slides ablation (negative result)
 
 A natural hypothesis was that GNCAF's slide-level collapse stems from
@@ -132,6 +148,29 @@ The cascade closes this gap by **explicit gatekeeping** at deployment
 patch-level calibration. Bg-only training is the right move for
 *patch-level* downstream tasks (counting, localization), but it's not
 sufficient to close the GNCAF → cascade slide-level pixel-dice gap.
+
+### Cascade + GNCAF ensemble (no-op, dominated)
+
+v3.51's strong patch-grid GC dice (0.638) raised the question of
+whether ensembling with v3.37 — using v3.37 for spatial localization
+and v3.51 for GC count refinement — could push the champion higher.
+Comparison shows **v3.37 dominates v3.51 on every count and pixel
+metric**, so no ensemble combination improves over v3.37 alone:
+
+| Metric | v3.37 | v3.51 | winner |
+|---|---|---|---|
+| mDice_pix | 0.845 | 0.322 | **v3.37** |
+| TLS dice (pix) | 0.822 | 0.268 | **v3.37** |
+| GC dice (pix) | 0.868 | 0.376 | **v3.37** |
+| TLS Spearman | 0.876 | 0.485 | **v3.37** |
+| GC Spearman | 0.934 | 0.593 | **v3.37** |
+| TLS MAE | 5.36 | 39.40 | **v3.37** |
+| GC MAE | 0.28 | 1.12 | **v3.37** |
+
+v3.51's patch-grid GC=0.638 is a *patch-presence classification*
+metric and doesn't translate to better per-slide counts or pixel
+masks. The cascade's Stage-2 pixel-level GC localization is
+structurally tighter than GNCAF's per-patch decoder.
 
 ### Quality vs cost frontier
 
