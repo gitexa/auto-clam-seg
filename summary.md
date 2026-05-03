@@ -44,6 +44,7 @@ slide-level pixel-aggregate where applicable; per-positives where stated).
 | v3.26 patchcls→cascade hybrid | 11.6 M | 0.777 | 0.709 | 0.845 | 0.879 | 0.831 | 0.43 | no | 0.13 |
 | v3.36 NeighborhoodPixelDecoder | 17.7 M | 0.658 | 0.686 | 0.629 | 0.874 | 0.862 | 0.48 | no | 18 |
 | v3.35 GNCAF — 12-layer vanilla ViT (paper-faithful, our retrain) | 25.5 M | 0.296 | 0.340 | 0.251 | 0.547 | 0.674 | 1.11 | yes (every patch) | 100 |
+| **GNCAF TransUNet v3.51** (+ 167 bg-only train slides) | 65.6 M | 0.322 | 0.268 | 0.376 | 0.485 | 0.593 | **1.12** | yes (every patch) | 107 |
 | **GNCAF TransUNet v3.50** (paper-faithful, our retrain on fold-0, **clean split**) | 65.6 M | 0.349 | 0.302 | 0.396 | 0.575 | 0.480 | 1.95 | yes (every patch) | 107 |
 | GNCAF TransUNet (recovered best ckpt, ep23) ⚠️ leaky | 65.6 M | 0.311¹ | 0.461 | 0.161 | 0.760 | 0.521 | 1.95 | yes (every patch) | 108 |
 | v3.21 GNCAF — 6-layer ViT, per-positives only | 14.9 M | (per-pos) 0.607 | 0.794 | 0.419 | — | — | — | yes (every patch) | infeasible |
@@ -76,7 +77,8 @@ not training-budget-limited.**
 
 | Architecture | Per-positives mDice | Slide-level mDice_pix | Δ |
 |---|---|---|---|
-| **GNCAF v3.50 TransUNet (paper-faithful, clean fold-0)** | **0.607** | **0.349** | **−0.258** |
+| **GNCAF v3.51 TransUNet (+ 167 bg-only train slides)** | **0.640** | **0.322** | **−0.318** |
+| GNCAF v3.50 TransUNet (paper-faithful, clean fold-0) | 0.607 | 0.349 | −0.258 |
 | GNCAF TransUNet (recovered best, leaky) | 0.714 | 0.311 | −0.403 |
 | GNCAF v3.35 (vanilla ViT) | 0.602 | 0.296 | −0.306 |
 | GNCAF v3.21 (6-layer ViT) | 0.607 | (infeasible at scale) | — |
@@ -95,6 +97,41 @@ This isn't a "GNCAF didn't train enough" story: the 65.6 M-param
 TransUNet was trained for 23 epochs and its per-positives matches
 paper expectations. The architecture is just inherently less suited
 to slide-level deployment than the cascade.
+
+### v3.51 — bg-only training slides ablation (negative result)
+
+A natural hypothesis was that GNCAF's slide-level collapse stems from
+never seeing bg-only slides during training: the model was only trained
+on the 481 train slides with HookNet GT, while at deployment ~17 % of
+the slide pool has zero TLS anywhere. **v3.51** added the 167 bg-only
+train slides as zero-mask supervision (8 random patches per slide per
+epoch). Comparison vs v3.50 (same architecture, same hyperparams):
+
+| Metric | v3.50 | v3.51 (+ bg-only) | Δ |
+|---|---|---|---|
+| Per-positives val mDice (training) | 0.607 | **0.640** | +0.033 |
+| Patch-grid mDice (slide-level) | 0.341 | **0.411** | +0.070 |
+| Patch-grid GC dice | 0.463 | **0.638** | +0.175 |
+| GC MAE / slide | 1.95 | **1.12** | −0.83 |
+| **Pixel-agg mDice (deployment)** | **0.349** | 0.322 | −0.027 |
+| Pixel-agg TLS dice | 0.302 | 0.268 | −0.034 |
+| Pixel-agg GC dice | 0.396 | 0.376 | −0.020 |
+
+**Bg-only supervision improved every patch-level / per-positives metric
+but slightly hurt the slide-level pixel-aggregate dice.** The model is
+better at "is this patch bg or has TLS/GC?" — patch-grid GC dice
+jumped 0.46 → 0.64, GC MAE dropped 1.95 → 1.12 — but the pixel masks
+it produces remain spatially noisy at slide scale. This implies the
+slide-level collapse is **not** primarily a "didn't see enough bg"
+problem; even with explicit zero-mask supervision on entire slides, the
+per-patch decoder still over-fires on bg patches it considers
+ambiguous.
+
+The cascade closes this gap by **explicit gatekeeping** at deployment
+(Stage 1 GAT refuses to forward >99 % of patches to Stage 2), not by
+patch-level calibration. Bg-only training is the right move for
+*patch-level* downstream tasks (counting, localization), but it's not
+sufficient to close the GNCAF → cascade slide-level pixel-dice gap.
 
 ### Quality vs cost frontier
 

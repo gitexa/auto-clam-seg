@@ -1,0 +1,51 @@
+defaults:
+  - _self_
+stage: gncaf
+label: v3.51_gncaf_transunet_bgneg
+seed: 42
+out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
+
+# Same architecture as v3.50 (paper-faithful: R50 + ViT-6L + GCN-3hop + 1 fusion).
+model:
+  hidden_size: 768
+  n_classes: 3
+  n_encoder_layers: 6
+  n_heads: 12
+  mlp_dim: 3072
+  n_hops: 3
+  n_fusion_layers: 1
+  feature_dim: 1536
+  dropout: 0.1
+
+# Same hyperparams as v3.50, plus include_negative_slides=true to expose
+# the model to the 167 bg-only train slides (zero-mask supervision).
+# Hypothesis: closes per-positives → slide-level collapse by reducing
+# slide-scale FP at deployment.
+train:
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  epochs: 60
+  patience: 12
+  warmup_epochs: 5
+  class_weights: [1.0, 5.0, 3.0]
+  max_pos_per_slide: 16
+  bg_per_pos: 1.0
+  num_workers: 12
+  freeze_cnn: true
+  amp: true
+  grad_clip: 1.0
+  include_negative_slides: true
+  neg_slide_targets: 8        # 8 random bg patches per bg-only slide per epoch
+
+wandb:
+  enabled: true
+  project: tls-pixel-seg
+  entity: null
+  mode: ${oc.env:WANDB_MODE,online}
+  tags: [v3, gncaf, transunet, bg-only-slides, benchmark]
+
+hydra:
+  run:
+    dir: ${out_root}/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+  job:
+    chdir: false

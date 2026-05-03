@@ -66,13 +66,19 @@ class GNCAFFastDataset(Dataset):
     """
 
     def __init__(self, entries, pos_lookup: dict[str, set[int]],
-                 max_pos: int, bg_per_pos: float = 1.0, rng_seed: int = 0):
-        self.entries = [e for e in entries
-                        if e.get("zarr_path") and e.get("mask_path")]
+                 max_pos: int, bg_per_pos: float = 1.0, rng_seed: int = 0,
+                 include_negative_slides: bool = False,
+                 neg_slide_targets: int = 4):
+        if include_negative_slides:
+            self.entries = [e for e in entries if e.get("zarr_path")]
+        else:
+            self.entries = [e for e in entries
+                            if e.get("zarr_path") and e.get("mask_path")]
         self.pos_lookup = pos_lookup
         self.max_pos = max_pos
         self.bg_per_pos = bg_per_pos
         self.rng_seed = rng_seed
+        self.neg_slide_targets = neg_slide_targets
 
     def __len__(self):
         return len(self.entries)
@@ -87,32 +93,41 @@ class GNCAFFastDataset(Dataset):
 
         wsi_path = slide_wsi_path(entry)
         mask_path = slide_mask_path(entry)
-        if not (os.path.exists(wsi_path) and mask_path and os.path.exists(mask_path)):
+        if not os.path.exists(wsi_path):
             return None
+        is_negative_slide = mask_path is None or not os.path.exists(mask_path)
         wsi_z = zarr.open(tifffile.imread(wsi_path, aszarr=True, level=0), mode="r")
-        mask_z = zarr.open(tifffile.imread(mask_path, aszarr=True, level=0), mode="r")
+        mask_z = None if is_negative_slide else zarr.open(
+            tifffile.imread(mask_path, aszarr=True, level=0), mode="r")
 
-        pos_set = self.pos_lookup.get(short, set())
-        all_idx = np.arange(n)
-        pos_idx = np.array([i for i in all_idx if i in pos_set], dtype=np.int64)
-        neg_idx = np.array([i for i in all_idx if i not in pos_set], dtype=np.int64)
+        if is_negative_slide:
+            n_target = min(self.neg_slide_targets, n)
+            target_idx = rng.choice(n, size=n_target, replace=False).astype(np.int64)
+        else:
+            pos_set = self.pos_lookup.get(short, set())
+            all_idx = np.arange(n)
+            pos_idx = np.array([i for i in all_idx if i in pos_set], dtype=np.int64)
+            neg_idx = np.array([i for i in all_idx if i not in pos_set], dtype=np.int64)
 
-        n_pos = min(len(pos_idx), self.max_pos)
-        n_bg = int(np.ceil(n_pos * self.bg_per_pos))
-        n_bg = min(n_bg, len(neg_idx))
-        chosen_pos = rng.choice(pos_idx, size=n_pos, replace=False) if n_pos > 0 else np.empty(0, dtype=np.int64)
-        chosen_bg = rng.choice(neg_idx, size=n_bg, replace=False) if n_bg > 0 else np.empty(0, dtype=np.int64)
-        target_idx = np.concatenate([chosen_pos, chosen_bg])
-        if target_idx.size == 0:
-            return None
+            n_pos = min(len(pos_idx), self.max_pos)
+            n_bg = int(np.ceil(n_pos * self.bg_per_pos))
+            n_bg = min(n_bg, len(neg_idx))
+            chosen_pos = rng.choice(pos_idx, size=n_pos, replace=False) if n_pos > 0 else np.empty(0, dtype=np.int64)
+            chosen_bg = rng.choice(neg_idx, size=n_bg, replace=False) if n_bg > 0 else np.empty(0, dtype=np.int64)
+            target_idx = np.concatenate([chosen_pos, chosen_bg])
+            if target_idx.size == 0:
+                return None
 
         rgbs, masks = [], []
         for ti in target_idx:
             x, y = int(coords[ti, 0]), int(coords[ti, 1])
             rgb = _read_target_rgb_tile(wsi_z, x, y)
-            m = _read_target_mask_tile(mask_z, x, y)
             rgbs.append(_normalise_rgb(rgb))
-            masks.append(torch.from_numpy(m.astype(np.int64)))
+            if mask_z is None:
+                masks.append(torch.zeros(PATCH_SIZE, PATCH_SIZE, dtype=torch.int64))
+            else:
+                m = _read_target_mask_tile(mask_z, x, y)
+                masks.append(torch.from_numpy(m.astype(np.int64)))
 
         return {
             "features": torch.from_numpy(features),

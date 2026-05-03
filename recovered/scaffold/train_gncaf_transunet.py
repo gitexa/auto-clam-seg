@@ -101,6 +101,8 @@ def main(cfg: DictConfig) -> None:
         max_pos=cfg.train.max_pos_per_slide,
         bg_per_pos=cfg.train.bg_per_pos,
         rng_seed=cfg.seed,
+        include_negative_slides=cfg.train.get("include_negative_slides", False),
+        neg_slide_targets=cfg.train.get("neg_slide_targets", 4),
     )
     val_ds = GNCAFFastDataset(
         val_entries, pos_lookup,

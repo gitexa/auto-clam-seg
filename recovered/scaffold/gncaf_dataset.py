@@ -157,8 +157,12 @@ class GNCAFSlideDataset(torch.utils.data.Dataset):
         max_targets: int = 16,
         neg_per_pos: float = 1.0,
         rng_seed: int | None = None,
+        include_negative_slides: bool = False,
     ) -> None:
-        self.entries = [e for e in entries if e.get("zarr_path") and e.get("mask_path")]
+        if include_negative_slides:
+            self.entries = [e for e in entries if e.get("zarr_path")]
+        else:
+            self.entries = [e for e in entries if e.get("zarr_path") and e.get("mask_path")]
         self.max_targets = max_targets
         self.neg_per_pos = neg_per_pos
         self.rng_seed = rng_seed
@@ -173,49 +177,53 @@ class GNCAFSlideDataset(torch.utils.data.Dataset):
         features, coords, edge_index = _load_features_and_graph(entry["zarr_path"])
         n = features.shape[0]
 
-        # Open WSI + mask as zarr-views for windowed reads.
+        # Open WSI as zarr-view for windowed reads. Mask may be missing for
+        # bg-only slides — handled below.
         wsi_path = slide_wsi_path(entry)
         mask_path = slide_mask_path(entry)
-        if not (os.path.exists(wsi_path) and mask_path and os.path.exists(mask_path)):
-            raise FileNotFoundError(f"Missing WSI or mask for {entry['slide_id']}: "
-                                    f"wsi={wsi_path}, mask={mask_path}")
+        if not os.path.exists(wsi_path):
+            raise FileNotFoundError(f"Missing WSI for {entry['slide_id']}: wsi={wsi_path}")
+        is_negative_slide = mask_path is None or not os.path.exists(mask_path)
         wsi_z = zarr.open(tifffile.imread(wsi_path, aszarr=True, level=0), mode="r")
-        mask_z = zarr.open(tifffile.imread(mask_path, aszarr=True, level=0), mode="r")
+        mask_z = None if is_negative_slide else zarr.open(
+            tifffile.imread(mask_path, aszarr=True, level=0), mode="r")
 
-        # Determine which patches are TLS-positive by sampling the mask centre.
-        # Cheap heuristic: read just the centre pixel of each patch's mask cell.
         rng = np.random.default_rng(self.rng_seed)
-        centre_y = (coords[:, 1] + PATCH_SIZE // 2).astype(np.int64)
-        centre_x = (coords[:, 0] + PATCH_SIZE // 2).astype(np.int64)
-        mh, mw = mask_z.shape
-        centre_y = np.clip(centre_y, 0, mh - 1)
-        centre_x = np.clip(centre_x, 0, mw - 1)
-        # Vectorised sample: read each centre pixel.
-        centre_label = np.asarray(
-            [int(mask_z[int(y), int(x)]) for y, x in zip(centre_y, centre_x)]
-        )
-        pos_mask = centre_label > 0
-        pos_idx = np.where(pos_mask)[0]
-        neg_idx = np.where(~pos_mask)[0]
 
-        # Sampling: all positives (capped) + neg_per_pos × pos negatives.
-        n_pos = min(len(pos_idx), self.max_targets)
-        n_neg = min(len(neg_idx), int(np.ceil(n_pos * self.neg_per_pos)),
-                    self.max_targets - n_pos)
-        if n_pos > 0:
-            chosen_pos = rng.choice(pos_idx, size=n_pos, replace=False)
+        if is_negative_slide:
+            # No GT mask: every patch is bg. Sample max_targets random patches;
+            # target_mask is all-zero (bg class) for each.
+            n_target = min(self.max_targets, n)
+            target_idx = rng.choice(n, size=n_target, replace=False).astype(np.int64)
         else:
-            chosen_pos = np.empty(0, dtype=np.int64)
-        if n_neg > 0:
-            chosen_neg = rng.choice(neg_idx, size=n_neg, replace=False)
-        else:
-            chosen_neg = np.empty(0, dtype=np.int64)
-        target_idx = np.concatenate([chosen_pos, chosen_neg])
+            # Determine which patches are TLS-positive by sampling the mask centre.
+            centre_y = (coords[:, 1] + PATCH_SIZE // 2).astype(np.int64)
+            centre_x = (coords[:, 0] + PATCH_SIZE // 2).astype(np.int64)
+            mh, mw = mask_z.shape
+            centre_y = np.clip(centre_y, 0, mh - 1)
+            centre_x = np.clip(centre_x, 0, mw - 1)
+            centre_label = np.asarray(
+                [int(mask_z[int(y), int(x)]) for y, x in zip(centre_y, centre_x)]
+            )
+            pos_mask = centre_label > 0
+            pos_idx = np.where(pos_mask)[0]
+            neg_idx = np.where(~pos_mask)[0]
 
-        if target_idx.size == 0:
-            # Slide has zero usable patches — return one random target so the
-            # batch doesn't explode (loss will reflect background class).
-            target_idx = np.array([rng.integers(0, n)], dtype=np.int64)
+            n_pos = min(len(pos_idx), self.max_targets)
+            n_neg = min(len(neg_idx), int(np.ceil(n_pos * self.neg_per_pos)),
+                        self.max_targets - n_pos)
+            if n_pos > 0:
+                chosen_pos = rng.choice(pos_idx, size=n_pos, replace=False)
+            else:
+                chosen_pos = np.empty(0, dtype=np.int64)
+            if n_neg > 0:
+                chosen_neg = rng.choice(neg_idx, size=n_neg, replace=False)
+            else:
+                chosen_neg = np.empty(0, dtype=np.int64)
+            target_idx = np.concatenate([chosen_pos, chosen_neg])
+
+            if target_idx.size == 0:
+                target_idx = np.array([rng.integers(0, n)], dtype=np.int64)
 
         # Read each target's RGB + mask tile at slide-native pixels.
         target_rgbs = []
@@ -223,9 +231,12 @@ class GNCAFSlideDataset(torch.utils.data.Dataset):
         for ti in target_idx:
             x, y = int(coords[ti, 0]), int(coords[ti, 1])
             rgb = _read_target_rgb_tile(wsi_z, x, y)
-            mask = _read_target_mask_tile(mask_z, x, y)
             target_rgbs.append(_normalise_rgb(rgb))
-            target_masks.append(torch.from_numpy(mask.astype(np.int64)))
+            if mask_z is None:
+                target_masks.append(torch.zeros(PATCH_SIZE, PATCH_SIZE, dtype=torch.int64))
+            else:
+                mask = _read_target_mask_tile(mask_z, x, y)
+                target_masks.append(torch.from_numpy(mask.astype(np.int64)))
 
         return {
             "features": torch.from_numpy(features),                   # (N, 1536)
