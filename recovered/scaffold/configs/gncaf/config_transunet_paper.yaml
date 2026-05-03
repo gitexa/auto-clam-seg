@@ -1,0 +1,51 @@
+defaults:
+  - _self_
+stage: gncaf
+label: v3.50_gncaf_transunet_supersede
+seed: 42
+out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
+
+# Paper-faithful architecture (R50 + ViT-6L + GCN-3hop + 1 fusion).
+model:
+  hidden_size: 768
+  n_classes: 3
+  n_encoder_layers: 6
+  n_heads: 12
+  mlp_dim: 3072
+  n_hops: 3
+  n_fusion_layers: 1
+  feature_dim: 1536
+  dropout: 0.1
+
+# Improvements over the recovered best (mDice=0.7143):
+#   - Use ALL train slides (not 100). Existing best used max_slides=100.
+#   - Longer schedule (60 ep vs 30) + bigger patience (12 vs 10).
+#   - Higher max_pos_per_slide (16 vs 4).
+#   - Class_weights matching v3.4b (TLS 5×, GC 3×) — existing used [1,1,2].
+#   - Keep R50 frozen (paper config).
+train:
+  lr: 3.0e-4               # match the existing best
+  weight_decay: 1.0e-4
+  epochs: 60
+  patience: 12
+  warmup_epochs: 5
+  class_weights: [1.0, 5.0, 3.0]
+  max_pos_per_slide: 16
+  bg_per_pos: 1.0
+  num_workers: 12
+  freeze_cnn: true          # paper: freeze ImageNet R50
+  amp: true
+  grad_clip: 1.0
+
+wandb:
+  enabled: true
+  project: tls-pixel-seg
+  entity: null
+  mode: ${oc.env:WANDB_MODE,online}
+  tags: [v3, gncaf, transunet, paper-supersede, benchmark]
+
+hydra:
+  run:
+    dir: ${out_root}/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+  job:
+    chdir: false
