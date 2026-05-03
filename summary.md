@@ -44,7 +44,8 @@ slide-level pixel-aggregate where applicable; per-positives where stated).
 | v3.26 patchcls→cascade hybrid | 11.6 M | 0.777 | 0.709 | 0.845 | 0.879 | 0.831 | 0.43 | no | 0.13 |
 | v3.36 NeighborhoodPixelDecoder | 17.7 M | 0.658 | 0.686 | 0.629 | 0.874 | 0.862 | 0.48 | no | 18 |
 | v3.35 GNCAF — 12-layer vanilla ViT (paper-faithful, our retrain) | 25.5 M | 0.296 | 0.340 | 0.251 | 0.547 | 0.674 | 1.11 | yes (every patch) | 100 |
-| **GNCAF TransUNet** (recovered best ckpt, ep23) ⚠️ | 65.6 M | 0.311¹ | 0.461 | 0.161 | 0.760 | 0.521 | 1.95 | yes (every patch) | 108 |
+| **GNCAF TransUNet v3.50** (paper-faithful, our retrain on fold-0, **clean split**) | 65.6 M | 0.349 | 0.302 | 0.396 | 0.575 | 0.480 | 1.95 | yes (every patch) | 107 |
+| GNCAF TransUNet (recovered best ckpt, ep23) ⚠️ leaky | 65.6 M | 0.311¹ | 0.461 | 0.161 | 0.760 | 0.521 | 1.95 | yes (every patch) | 108 |
 | v3.21 GNCAF — 6-layer ViT, per-positives only | 14.9 M | (per-pos) 0.607 | 0.794 | 0.419 | — | — | — | yes (every patch) | infeasible |
 
 `patchcls` patch-grid metric (only metric it natively produces):
@@ -56,8 +57,15 @@ those overlap with our cascade's 124-slide val. The recovered
 training (100 slides, drawn from a different fold) likely overlaps
 with ~15-20 of our 124 val slides → those slides were *seen during
 training* of the recovered TransUNet, so 0.311 is an **over-estimate**
-of its true generalisation. The clean-split TransUNet number will
-come from v3.50 (currently training on our standard fold-0 split).
+of its true generalisation. The leak-free TransUNet number is
+**v3.50 = 0.349** (paper-faithful retrain on our standard fold-0 split,
+60 ep schedule, R50 frozen, all train slides). The clean number
+modestly *exceeds* the leaky 0.311 — the leak hurt by simply training
+on a noisier 100-slide subset rather than helping; in either case
+TransUNet GNCAF lands in the same 0.30–0.35 mDice_pix band, which is
+**0.5 mDice_pix below the v3.37 cascade champion (0.845)** and confirms
+that the structural per-positives → slide-level gap is architectural,
+not a training-budget or split artefact.
 
 ### The per-positives → slide-level collapse
 
@@ -68,8 +76,9 @@ not training-budget-limited.**
 
 | Architecture | Per-positives mDice | Slide-level mDice_pix | Δ |
 |---|---|---|---|
-| GNCAF TransUNet (recovered best) | 0.714 | 0.311 | **−0.403** |
-| GNCAF v3.35 (vanilla ViT) | 0.602 | 0.296 | **−0.306** |
+| **GNCAF v3.50 TransUNet (paper-faithful, clean fold-0)** | **0.607** | **0.349** | **−0.258** |
+| GNCAF TransUNet (recovered best, leaky) | 0.714 | 0.311 | −0.403 |
+| GNCAF v3.35 (vanilla ViT) | 0.602 | 0.296 | −0.306 |
 | GNCAF v3.21 (6-layer ViT) | 0.607 | (infeasible at scale) | — |
 | GNCAF v3.40 (longer schedule) | 0.668 | (pending) | — |
 | **v3.13 cascade** | (per-pos n/a — Stage 2 only) | **0.784** | n/a |
