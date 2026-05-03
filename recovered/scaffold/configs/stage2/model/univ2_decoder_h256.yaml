@@ -1,0 +1,9 @@
+# @package model
+# Stage 2 — UNIv2PixelDecoder, h=256 (double v3.4b's h=128).
+# v3.27 — test whether bigger Stage 2 lifts the TLS dice (currently
+# 0.722 vs GC 0.846 — the largest dice headroom in the cascade).
+in_dim: 1536
+bottleneck: 512
+hidden_channels: 256
+spatial_size: 16
+n_classes: 3

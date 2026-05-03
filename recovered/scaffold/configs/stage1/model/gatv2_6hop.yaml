@@ -1,0 +1,8 @@
+# @package model
+# v3.32 — extend the depth sweep past v3.8 (5hop). v3.13 cascade ceiling.
+gnn_type: gatv2
+n_hops: 6
+hidden_dim: 256
+dropout: 0.1
+gat_heads: 4
+in_dim: 1536

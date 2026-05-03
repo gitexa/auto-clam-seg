@@ -6,11 +6,28 @@ seed: 42
 out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
 
 stage1: ???    # path to Stage 1 best_checkpoint.pt (REQUIRED)
-stage2: ???    # path to Stage 2 best_checkpoint.pt (REQUIRED)
+stage2: ???    # path to Stage 2 best_checkpoint.pt (REQUIRED unless neighborhood_mode/region_mode)
+neighborhood_mode: false       # v3.36: NeighborhoodPixelDecoder over 3x3 UNI cells
+stage2_neighborhood: null      # NeighborhoodPixelDecoder ckpt
+nbhd_s2_batch: 16              # 768x768 decoder batch
+region_mode: false             # v3.37: RegionDecoder (RGB+UNI+graph) over 3x3 cells
+stage2_region: null            # RegionDecoder ckpt
+region_s2_batch: 8             # 768x768 decoder batch (heavier than nbhd: ResNet activations)
+limit_slides: null             # smoke flag — eval only first N val slides
 
 thresholds: [0.05, 0.10, 0.20, 0.30, 0.40, 0.50]
 upsample_factor: 4
 s2_batch: 64
+# Counting post-processing on the patch grid before connected components.
+min_component_size: 1   # drop instances smaller than this many cells
+closing_iters: 0        # binary closing iterations (fills 1-cell gaps)
+top_k_frac: null        # if set (e.g., 0.005), select top-K% of patches per
+                        # slide instead of using absolute `threshold` (adaptive)
+min_top_k: 10           # floor on top-K count per slide
+top_k_abstain_thr: null # if set with top_k_frac, top-K only fires when at
+                        # least one patch's prob exceeds this threshold;
+                        # otherwise fall back to absolute `threshold` (abstain)
+patch_cache_path: /home/ubuntu/local_data/tls_patch_dataset.pt
 
 wandb:
   enabled: true

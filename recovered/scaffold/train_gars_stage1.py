@@ -334,12 +334,16 @@ def main(cfg: DictConfig) -> None:
             f"lr={lr:.2e} train={train_t:.0f}s val={val_t:.0f}s {marker}"
         )
         if run is not None:
+            # Match the recovered run's key set (x50tcqt6) so comparisons
+            # are 1:1 in wandb.
             run.log({
                 "epoch": epoch, "lr": lr,
                 "train/loss": tr["loss"], "train/f1": tr["f1"],
                 "train/recall": tr["recall"], "train/precision": tr["precision"],
                 "val/loss": va["loss"], "val/f1": va["f1"],
                 "val/recall": va["recall"], "val/precision": va["precision"],
+                "val/tp": va["tp"], "val/fp": va["fp"],
+                "val/fn": va["fn"], "val/tn": va["tn"],
                 "val/n_selected": va["n_selected"], "val/n_total": va["n_total"],
                 "best_f1": max(best_f1, va["f1"]),
             }, step=epoch)
@@ -381,6 +385,10 @@ def main(cfg: DictConfig) -> None:
     if run is not None:
         run.summary["best_f1"] = best_f1
         run.summary["best_epoch"] = best_epoch
+        if last_va is not None:
+            run.summary["final_recall"] = last_va["recall"]
+            run.summary["final_precision"] = last_va["precision"]
+            run.summary["final_f1"] = last_va["f1"]
         run.finish()
 
 

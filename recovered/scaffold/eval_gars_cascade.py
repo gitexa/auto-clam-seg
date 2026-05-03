@@ -37,6 +37,43 @@ from train_gars_stage1 import GraphTLSDetector  # noqa: E402
 from train_gars_stage2 import UNIv2PixelDecoder  # noqa: E402
 
 PATCH_SIZE = 256
+NEIGHBORHOOD_GRID = 3   # 3×3 windows for v3.36 NeighborhoodPixelDecoder
+
+
+def load_stage2_neighborhood(ckpt_path: str, device: torch.device):
+    """Load v3.36 NeighborhoodPixelDecoder with strict=True."""
+    from train_gars_neighborhood import NeighborhoodPixelDecoder
+    obj = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    cfg = obj.get("config", {}) or {}
+    m = cfg.get("model", cfg)
+    model = NeighborhoodPixelDecoder(
+        in_dim=m.get("in_dim", 1536),
+        bottleneck=m.get("bottleneck", 512),
+        hidden_channels=m.get("hidden_channels", 128),
+        spatial_size=m.get("spatial_size", 16),
+        n_classes=m.get("n_classes", 3),
+    )
+    model.load_state_dict(obj["model_state_dict"], strict=True)
+    return model.to(device).eval()
+
+
+def load_stage2_region(ckpt_path: str, device: torch.device):
+    """Load v3.37 RegionDecoder (RGB+UNI+graph) with strict=True."""
+    from region_decoder_model import RegionDecoder
+    obj = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    cfg = obj.get("config", {}) or {}
+    m = cfg.get("model", cfg)
+    model = RegionDecoder(
+        uni_dim=m.get("uni_dim", 1536),
+        gat_dim=m.get("gat_dim", 256),
+        hidden_channels=m.get("hidden_channels", 64),
+        n_classes=m.get("n_classes", 3),
+        grid_n=m.get("grid_n", 3),
+        rgb_pretrained=False,           # weights overridden by strict-load anyway
+        freeze_rgb_encoder=False,
+    )
+    model.load_state_dict(obj["model_state_dict"], strict=True)
+    return model.to(device).eval()
 
 
 def load_stage1(ckpt_path: str, device: torch.device) -> GraphTLSDetector:
@@ -73,11 +110,20 @@ def load_stage2(ckpt_path: str, device: torch.device) -> UNIv2PixelDecoder:
 
 @torch.no_grad()
 def cascade_one_slide(stage1, stage2, features, coords, edge_index, threshold,
-                      device, s2_batch=64):
+                      device, s2_batch=64, top_k_frac: float | None = None,
+                      min_top_k: int = 1, top_k_abstain_thr: float | None = None):
     """Returns:
         grid_class:    (H_grid, W_grid) patch-level argmax (priority GC>TLS>bg)
         selected:      indices Stage 1 picked
         pred_tiles:    {patch_idx: (256, 256) np.uint8 argmax mask} for selected
+
+    Selection rule:
+        - If `top_k_frac` is None, use absolute `threshold` on Stage 1 prob.
+        - Else, select top-K% of patches by Stage 1 prob (per-slide
+          adaptive threshold). Useful when slides vary in TLS density.
+        - If `top_k_abstain_thr` is also set, top-K is only used when at
+          least one patch's prob exceeds it; otherwise fall back to
+          absolute `threshold`. Avoids forcing top-K on TLS-empty slides.
     """
     n = features.shape[0]
     grid_x = (coords[:, 0] / PATCH_SIZE).long()
@@ -89,7 +135,14 @@ def cascade_one_slide(stage1, stage2, features, coords, edge_index, threshold,
 
     s1_logits = stage1(features.to(device), edge_index.to(device))
     s1_probs = torch.sigmoid(s1_logits).cpu().numpy()
-    selected = np.where(s1_probs > threshold)[0]
+    use_topk = top_k_frac is not None
+    if use_topk and top_k_abstain_thr is not None:
+        use_topk = bool((s1_probs > top_k_abstain_thr).any())
+    if use_topk:
+        k = max(min_top_k, int(top_k_frac * n))
+        selected = np.argpartition(-s1_probs, min(k, n - 1))[:k]
+    else:
+        selected = np.where(s1_probs > threshold)[0]
 
     pred_class_per_patch = np.zeros(n, dtype=np.int64)
     pred_tiles: dict[int, np.ndarray] = {}
@@ -108,6 +161,280 @@ def cascade_one_slide(stage1, stage2, features, coords, edge_index, threshold,
     for i in range(n):
         gx, gy = int(grid_x[i]), int(grid_y[i])
         grid_class[gy, gx] = pred_class_per_patch[i]
+    return grid_class, len(selected), pred_tiles
+
+
+@torch.no_grad()
+def cascade_one_slide_neighborhood(stage1, stage2_nbhd, features, coords,
+                                    edge_index, threshold, device,
+                                    s2_batch=16,
+                                    min_component_size=2,
+                                    closing_iters=1):
+    """Neighborhood-cascade variant of cascade_one_slide.
+
+    Stage 1 score → binary closing → connected components → 3×3 windows
+    centered on each component (stride-2 raster for components > 3×3).
+    Each window decoded by NeighborhoodPixelDecoder → 768×768 probs.
+    Slide-level prob accumulator with max-prob reconciliation.
+
+    Returns the same triple as `cascade_one_slide`:
+        grid_class, len(selected), pred_tiles (256×256 per Stage-1-positive patch)
+    """
+    from scipy.ndimage import binary_closing as _bclose, label as _label
+    n = features.shape[0]
+    grid_x = (coords[:, 0] / PATCH_SIZE).long()
+    grid_y = (coords[:, 1] / PATCH_SIZE).long()
+    grid_x -= grid_x.min(); grid_y -= grid_y.min()
+    H = int(grid_y.max().item()) + 1
+    W = int(grid_x.max().item()) + 1
+    grid_x_np = grid_x.numpy(); grid_y_np = grid_y.numpy()
+    coord_to_idx = {(int(grid_y_np[i]), int(grid_x_np[i])): i for i in range(n)}
+
+    # Stage 1 selection.
+    s1_logits = stage1(features.to(device), edge_index.to(device))
+    s1_probs = torch.sigmoid(s1_logits).cpu().numpy()
+    selected = np.where(s1_probs > threshold)[0]
+    selected_grid = np.zeros((H, W), dtype=np.uint8)
+    for i in selected:
+        selected_grid[int(grid_y_np[i]), int(grid_x_np[i])] = 1
+
+    # Connected components on (selected_grid + closing).
+    if closing_iters > 0:
+        binary = _bclose(selected_grid.astype(bool), iterations=closing_iters)
+    else:
+        binary = selected_grid.astype(bool)
+    lab, n_comp = _label(binary)
+
+    # Enumerate 3×3 windows.
+    windows: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    G = NEIGHBORHOOD_GRID
+
+    def add_window(top_y: int, top_x: int):
+        top_y = max(0, min(H - G, top_y))
+        top_x = max(0, min(W - G, top_x))
+        key = (top_y, top_x)
+        if key not in seen:
+            seen.add(key); windows.append(key)
+
+    for c in range(1, n_comp + 1):
+        ys, xs = np.where(lab == c)
+        if ys.size < min_component_size:
+            continue
+        y0, y1 = int(ys.min()), int(ys.max()) + 1
+        x0, x1 = int(xs.min()), int(xs.max()) + 1
+        if (y1 - y0) <= G and (x1 - x0) <= G:
+            cy = (y0 + y1) // 2; cx = (x0 + x1) // 2
+            add_window(cy - G // 2, cx - G // 2)
+        else:
+            for ty in range(max(0, y0 - 1), max(y0, y1 - (G - 1)) + 1, 2):
+                for tx in range(max(0, x0 - 1), max(x0, x1 - (G - 1)) + 1, 2):
+                    add_window(ty, tx)
+    if not windows:
+        # No candidate regions — return empty result like cascade_one_slide.
+        return np.zeros((H, W), dtype=np.int64), 0, {}
+
+    # Build (n_w, 9, 1536) feature batch + (n_w, 9) valid_mask + window meta.
+    n_w = len(windows)
+    win_features = np.zeros((n_w, G * G, features.shape[1]), dtype=np.float32)
+    win_valid = np.zeros((n_w, G * G), dtype=bool)
+    win_cells_patchidx: list[list[int | None]] = [[None] * (G * G) for _ in range(n_w)]
+    feats_np = features.numpy() if torch.is_tensor(features) else features
+    for wi, (ty, tx) in enumerate(windows):
+        for k in range(G * G):
+            dy, dx = divmod(k, G)
+            gy = ty + dy; gx = tx + dx
+            pi = coord_to_idx.get((gy, gx))
+            if pi is not None:
+                win_features[wi, k] = feats_np[pi]
+                win_valid[wi, k] = True
+                win_cells_patchidx[wi][k] = pi
+
+    # Per-cell prob dict (max-prob reconciliation over overlapping windows).
+    # Avoids the 30 GB slide-wide accumulator we had originally.
+    cell_probs: dict[tuple[int, int], np.ndarray] = {}
+
+    feats_t = torch.from_numpy(win_features).to(device)
+    valid_t = torch.from_numpy(win_valid).to(device)
+    for s in range(0, n_w, s2_batch):
+        f_b = feats_t[s : s + s2_batch]
+        v_b = valid_t[s : s + s2_batch]
+        logits = stage2_nbhd(f_b, v_b)                              # (B, 3, 768, 768)
+        probs = torch.softmax(logits, dim=1).cpu().numpy()          # (B, 3, 768, 768)
+        for b, wi in enumerate(range(s, s + f_b.shape[0])):
+            ty, tx = windows[wi]
+            for k in range(G * G):
+                dy, dx = divmod(k, G)
+                gy = ty + dy; gx = tx + dx
+                if not (0 <= gy < H and 0 <= gx < W):
+                    continue
+                if not bool(win_valid[wi, k]):
+                    continue
+                cell = probs[b, :, dy * PATCH_SIZE:(dy + 1) * PATCH_SIZE,
+                                  dx * PATCH_SIZE:(dx + 1) * PATCH_SIZE]
+                existing = cell_probs.get((gy, gx))
+                if existing is None:
+                    cell_probs[(gy, gx)] = cell.copy()
+                else:
+                    np.maximum(existing, cell, out=existing)
+
+    # Build pred_tiles for Stage-1-positive patches (matches per-patch eval API).
+    pred_tiles: dict[int, np.ndarray] = {}
+    pred_class_per_patch = np.zeros(n, dtype=np.int64)
+    for i in selected:
+        gy = int(grid_y_np[i]); gx = int(grid_x_np[i])
+        cp = cell_probs.get((gy, gx))
+        if cp is None:
+            tile = np.zeros((PATCH_SIZE, PATCH_SIZE), dtype=np.uint8)
+        else:
+            tile = cp.argmax(axis=0).astype(np.uint8)
+        pred_tiles[int(i)] = tile
+        n_gc = int((tile == 2).sum()); n_tls = int((tile == 1).sum())
+        pred_class_per_patch[i] = 2 if n_gc > 0 else (1 if n_tls > 0 else 0)
+
+    grid_class = np.zeros((H, W), dtype=np.int64)
+    for i in range(n):
+        grid_class[int(grid_y_np[i]), int(grid_x_np[i])] = pred_class_per_patch[i]
+    return grid_class, len(selected), pred_tiles
+
+
+@torch.no_grad()
+def cascade_one_slide_region(stage1, stage2_region, features, coords, edge_index,
+                             threshold, device, wsi_path, s2_batch=8,
+                             min_component_size=2, closing_iters=1,
+                             return_cell_probs: bool = False):
+    """v3.37 region-cascade: Stage 1 → connected components → 3×3 windows
+    → RegionDecoder (RGB + UNI + graph). RGB tiles read from WSI .tif
+    on demand (only for selected regions, not the full slide).
+    """
+    from scipy.ndimage import binary_closing as _bclose, label as _label
+    import tifffile as _tifffile
+    import zarr  # noqa: F811
+    from gncaf_dataset import _read_target_rgb_tile, _normalise_rgb
+    from region_decoder_model import extract_stage1_context
+
+    n = features.shape[0]
+    grid_x = (coords[:, 0] / PATCH_SIZE).long()
+    grid_y = (coords[:, 1] / PATCH_SIZE).long()
+    grid_x -= grid_x.min(); grid_y -= grid_y.min()
+    H = int(grid_y.max().item()) + 1
+    W = int(grid_x.max().item()) + 1
+    grid_x_np = grid_x.numpy(); grid_y_np = grid_y.numpy()
+    coord_to_idx = {(int(grid_y_np[i]), int(grid_x_np[i])): i for i in range(n)}
+
+    # Stage 1 selection + graph context (single forward; head + before-head).
+    feats_dev = features.to(device); ei_dev = edge_index.to(device)
+    s1_logits = stage1(feats_dev, ei_dev)
+    s1_probs = torch.sigmoid(s1_logits).cpu().numpy()
+    graph_ctx_t = extract_stage1_context(stage1, feats_dev, ei_dev)   # (N, gat_dim)
+
+    selected = np.where(s1_probs > threshold)[0]
+    selected_grid = np.zeros((H, W), dtype=np.uint8)
+    for i in selected:
+        selected_grid[int(grid_y_np[i]), int(grid_x_np[i])] = 1
+    if closing_iters > 0:
+        binary = _bclose(selected_grid.astype(bool), iterations=closing_iters)
+    else:
+        binary = selected_grid.astype(bool)
+    lab, n_comp = _label(binary)
+
+    G = NEIGHBORHOOD_GRID
+    windows: list[tuple[int, int]] = []; seen: set[tuple[int, int]] = set()
+
+    def add_window(top_y: int, top_x: int):
+        top_y = max(0, min(H - G, top_y))
+        top_x = max(0, min(W - G, top_x))
+        key = (top_y, top_x)
+        if key not in seen:
+            seen.add(key); windows.append(key)
+
+    for c in range(1, n_comp + 1):
+        ys, xs = np.where(lab == c)
+        if ys.size < min_component_size:
+            continue
+        y0, y1 = int(ys.min()), int(ys.max()) + 1
+        x0, x1 = int(xs.min()), int(xs.max()) + 1
+        if (y1 - y0) <= G and (x1 - x0) <= G:
+            cy = (y0 + y1) // 2; cx = (x0 + x1) // 2
+            add_window(cy - G // 2, cx - G // 2)
+        else:
+            for ty in range(max(0, y0 - 1), max(y0, y1 - (G - 1)) + 1, 2):
+                for tx in range(max(0, x0 - 1), max(x0, x1 - (G - 1)) + 1, 2):
+                    add_window(ty, tx)
+    if not windows:
+        return np.zeros((H, W), dtype=np.int64), 0, {}
+
+    # Open WSI handle once.
+    wsi_z = zarr.open(_tifffile.imread(wsi_path, aszarr=True, level=0), mode="r")
+    feats_np = features.numpy() if torch.is_tensor(features) else features
+    coords_np = coords.numpy() if torch.is_tensor(coords) else coords
+    ctx_np = graph_ctx_t.cpu().numpy()
+
+    n_w = len(windows)
+    rgb_buf = np.zeros((n_w, G * G, 3, PATCH_SIZE, PATCH_SIZE), dtype=np.float32)
+    uni_buf = np.zeros((n_w, G * G, feats_np.shape[1]), dtype=np.float32)
+    gat_buf = np.zeros((n_w, G * G, ctx_np.shape[1]), dtype=np.float32)
+    val_buf = np.zeros((n_w, G * G), dtype=bool)
+
+    for wi, (ty, tx) in enumerate(windows):
+        for k in range(G * G):
+            dy, dx = divmod(k, G)
+            gy = ty + dy; gx = tx + dx
+            pi = coord_to_idx.get((gy, gx))
+            if pi is None:
+                continue
+            val_buf[wi, k] = True
+            uni_buf[wi, k] = feats_np[pi]
+            gat_buf[wi, k] = ctx_np[pi]
+            x0p = int(coords_np[pi, 0]); y0p = int(coords_np[pi, 1])
+            tile = _read_target_rgb_tile(wsi_z, x0p, y0p)            # (256, 256, 3)
+            rgb_buf[wi, k] = _normalise_rgb(tile).numpy()             # (3, 256, 256)
+
+    cell_probs: dict[tuple[int, int], np.ndarray] = {}
+
+    rgb_t = torch.from_numpy(rgb_buf).to(device)
+    uni_t = torch.from_numpy(uni_buf).to(device)
+    gat_t = torch.from_numpy(gat_buf).to(device)
+    val_t = torch.from_numpy(val_buf).to(device)
+    for s in range(0, n_w, s2_batch):
+        b_rgb = rgb_t[s : s + s2_batch]; b_uni = uni_t[s : s + s2_batch]
+        b_gat = gat_t[s : s + s2_batch]; b_val = val_t[s : s + s2_batch]
+        logits = stage2_region(b_rgb, b_uni, b_gat, b_val)
+        probs = torch.softmax(logits, dim=1).cpu().numpy()           # (B, 3, 768, 768)
+        for b, wi in enumerate(range(s, s + b_rgb.shape[0])):
+            ty, tx = windows[wi]
+            for k in range(G * G):
+                dy, dx = divmod(k, G)
+                gy = ty + dy; gx = tx + dx
+                if not (0 <= gy < H and 0 <= gx < W):
+                    continue
+                if not bool(val_buf[wi, k]):
+                    continue
+                cell = probs[b, :, dy * PATCH_SIZE:(dy + 1) * PATCH_SIZE,
+                                  dx * PATCH_SIZE:(dx + 1) * PATCH_SIZE]
+                existing = cell_probs.get((gy, gx))
+                if existing is None:
+                    cell_probs[(gy, gx)] = cell.copy()
+                else:
+                    np.maximum(existing, cell, out=existing)
+
+    pred_tiles: dict[int, np.ndarray] = {}
+    pred_class_per_patch = np.zeros(n, dtype=np.int64)
+    for i in selected:
+        gy = int(grid_y_np[i]); gx = int(grid_x_np[i])
+        cp = cell_probs.get((gy, gx))
+        if cp is None:
+            tile = np.zeros((PATCH_SIZE, PATCH_SIZE), dtype=np.uint8)
+        else:
+            tile = cp.argmax(axis=0).astype(np.uint8)
+        pred_tiles[int(i)] = tile
+        n_gc = int((tile == 2).sum()); n_tls = int((tile == 1).sum())
+        pred_class_per_patch[i] = 2 if n_gc > 0 else (1 if n_tls > 0 else 0)
+    grid_class = np.zeros((H, W), dtype=np.int64)
+    for i in range(n):
+        grid_class[int(grid_y_np[i]), int(grid_x_np[i])] = pred_class_per_patch[i]
+    if return_cell_probs:
+        return grid_class, len(selected), pred_tiles, cell_probs
     return grid_class, len(selected), pred_tiles
 
 
@@ -144,6 +471,22 @@ def count_components(grid, cls):
     return n
 
 
+def count_components_filtered(grid, cls, min_size: int = 1, closing_iters: int = 0):
+    """Connected-component count with min-size filter and optional
+    binary closing (fills 1-cell gaps so adjacent positive patches
+    that should be one instance aren't fragmented).
+    """
+    from scipy.ndimage import label, binary_closing
+    binary = (grid == cls)
+    if closing_iters > 0:
+        binary = binary_closing(binary, iterations=closing_iters)
+    labels, n = label(binary)
+    if min_size > 1 and n > 0:
+        sizes = np.bincount(labels.ravel())[1:]  # skip background (0)
+        n = int((sizes >= min_size).sum())
+    return n
+
+
 @hydra.main(version_base=None, config_path="configs/cascade", config_name="config")
 def main(cfg: DictConfig) -> None:
     out_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)
@@ -159,18 +502,50 @@ def main(cfg: DictConfig) -> None:
 
     print(f"Stage 1: {cfg.stage1}")
     stage1 = load_stage1(cfg.stage1, device)
-    print(f"Stage 2: {cfg.stage2}")
-    stage2 = load_stage2(cfg.stage2, device)
+    neighborhood_mode = bool(cfg.get("neighborhood_mode", False))
+    region_mode = bool(cfg.get("region_mode", False))
+    if neighborhood_mode and region_mode:
+        raise ValueError("neighborhood_mode and region_mode are mutually exclusive")
+    if region_mode:
+        rgn_ckpt = cfg.get("stage2_region")
+        if not rgn_ckpt:
+            raise ValueError("region_mode=true requires stage2_region=<ckpt>")
+        print(f"Stage 2 (region): {rgn_ckpt}")
+        stage2 = load_stage2_region(rgn_ckpt, device)
+    elif neighborhood_mode:
+        nbhd_ckpt = cfg.get("stage2_neighborhood")
+        if not nbhd_ckpt:
+            raise ValueError("neighborhood_mode=true requires stage2_neighborhood=<ckpt>")
+        print(f"Stage 2 (neighborhood): {nbhd_ckpt}")
+        stage2 = load_stage2_neighborhood(nbhd_ckpt, device)
+    else:
+        print(f"Stage 2: {cfg.stage2}")
+        stage2 = load_stage2(cfg.stage2, device)
 
     ps.set_seed(cfg.seed)
     entries = ps.build_slide_entries()
     folds_pair, _test = ps.create_splits(entries, k_folds=1, seed=cfg.seed)
     val_entries = folds_pair[0]
     val_entries = [e for e in val_entries if e.get("mask_path") is not None]
+    if cfg.get("limit_slides"):
+        val_entries = val_entries[: int(cfg.limit_slides)]
+        print(f"  limit_slides={cfg.limit_slides}")
     print(f"Val: {len(val_entries)} slides with masks\n")
 
     print(f"Loading mask cache (upsample_factor={cfg.upsample_factor})...")
     mask_dict = ps.build_mask_cache(val_entries, cfg.upsample_factor)
+
+    # Ground-truth instance counts (per slide) for the counting Spearman.
+    import pandas as pd
+    meta_df = pd.read_csv(ps.META_CSV)
+    gt_counts: dict[str, tuple[int, int]] = {}
+    for _, row in meta_df.iterrows():
+        sid = str(row.get("slide_id", ""))
+        if sid:
+            gt_counts[sid.split(".")[0]] = (
+                int(row.get("tls_num", 0)),
+                int(row.get("gc_num", 0)),
+            )
 
     # Native-resolution per-patch GT masks for per-pixel slide-level dice.
     print("Loading TLS-patch cache (native 256×256 GT masks for pixel dice)...")
@@ -224,10 +599,36 @@ def main(cfg: DictConfig) -> None:
                 continue
 
             t0 = time.time()
-            grid_class, n_selected, pred_tiles = cascade_one_slide(
-                stage1, stage2, features, coords, edge_index, thr, device,
-                s2_batch=cfg.s2_batch,
-            )
+            if region_mode:
+                from gncaf_dataset import slide_wsi_path as _wsi_path
+                wsi_p = _wsi_path(entry)
+                if not wsi_p or not Path(wsi_p).exists():
+                    print(f"  skip {short_id}: missing WSI tif")
+                    continue
+                grid_class, n_selected, pred_tiles = cascade_one_slide_region(
+                    stage1, stage2, features, coords, edge_index, thr, device,
+                    wsi_path=wsi_p,
+                    s2_batch=int(cfg.get("region_s2_batch", 8)),
+                    min_component_size=int(cfg.get("min_component_size", 2)),
+                    closing_iters=int(cfg.get("closing_iters", 1)),
+                )
+            elif neighborhood_mode:
+                grid_class, n_selected, pred_tiles = cascade_one_slide_neighborhood(
+                    stage1, stage2, features, coords, edge_index, thr, device,
+                    s2_batch=int(cfg.get("nbhd_s2_batch", 16)),
+                    min_component_size=int(cfg.get("min_component_size", 2)),
+                    closing_iters=int(cfg.get("closing_iters", 1)),
+                )
+            else:
+                top_k_frac = cfg.get("top_k_frac", None)
+                top_k_abstain_thr = cfg.get("top_k_abstain_thr", None)
+                grid_class, n_selected, pred_tiles = cascade_one_slide(
+                    stage1, stage2, features, coords, edge_index, thr, device,
+                    s2_batch=cfg.s2_batch,
+                    top_k_frac=top_k_frac,
+                    min_top_k=int(cfg.get("min_top_k", 10)),
+                    top_k_abstain_thr=top_k_abstain_thr,
+                )
             t_total = time.time() - t0
 
             # Patch-grid dice (coarse, what we had before — kept for backward compat).
@@ -249,13 +650,23 @@ def main(cfg: DictConfig) -> None:
                     agg[cls]["inter"] += int((p & t).sum())
                     agg[cls]["denom"] += int(p.sum() + t.sum())
 
+            min_size = int(cfg.get("min_component_size", 1))
+            close_iters = int(cfg.get("closing_iters", 0))
+            n_tls_pred = count_components_filtered(grid_class, 1, min_size, close_iters)
+            n_gc_pred = count_components_filtered(grid_class, 2, min_size, close_iters)
+            gt_n_tls, gt_n_gc = gt_counts.get(short_id, (
+                count_components(target_grid, 1),
+                count_components(target_grid, 2),
+            ))
             per_slide.append({
                 "slide_id": short_id, "cancer_type": entry["cancer_type"],
                 "tls_dice": tls_d, "gc_dice": gc_d, "mDice": (tls_d + gc_d) / 2.0,
-                "n_tls_pred": count_components(grid_class, 1),
+                "n_tls_pred": n_tls_pred,
                 "n_tls_true": count_components(target_grid, 1),
-                "n_gc_pred": count_components(grid_class, 2),
+                "n_gc_pred": n_gc_pred,
                 "n_gc_true": count_components(target_grid, 2),
+                # Metadata ground-truth (gold standard for counting).
+                "gt_n_tls": gt_n_tls, "gt_n_gc": gt_n_gc,
                 "n_selected": n_selected, "n_total": features.shape[0],
                 "t_total": t_total,
             })
@@ -274,16 +685,24 @@ def main(cfg: DictConfig) -> None:
         tls_pix = (2 * agg[1]["inter"] + eps) / (agg[1]["denom"] + eps)
         gc_pix = (2 * agg[2]["inter"] + eps) / (agg[2]["denom"] + eps)
         mD_pix = (tls_pix + gc_pix) / 2.0
-        tls_sp, _ = spearmanr([r["n_tls_true"] for r in per_slide],
-                              [r["n_tls_pred"] for r in per_slide])
-        gc_sp, _ = spearmanr([r["n_gc_true"] for r in per_slide],
-                             [r["n_gc_pred"] for r in per_slide])
+        # Metadata ground truth (gold standard).
+        gt_tls = [r["gt_n_tls"] for r in per_slide]
+        gt_gc = [r["gt_n_gc"] for r in per_slide]
+        pred_tls = [r["n_tls_pred"] for r in per_slide]
+        pred_gc = [r["n_gc_pred"] for r in per_slide]
+        tls_sp, _ = spearmanr(gt_tls, pred_tls)
+        gc_sp, _ = spearmanr(gt_gc, pred_gc) if any(gt_gc) else (0.0, 0.0)
+        from sklearn.metrics import mean_absolute_error
+        tls_mae = float(mean_absolute_error(gt_tls, pred_tls))
+        gc_mae = float(mean_absolute_error(gt_gc, pred_gc))
         per_slide_t = float(np.mean([r["t_total"] for r in per_slide]))
         sel_frac = n_selected_total / max(1, n_total_total)
         print(f"\n  Results ({len(per_slide)} slides, threshold={thr}):")
         print(f"    [patch-grid] mDice={mD:.4f}  TLS={tls_m:.4f}  GC={gc_m:.4f}")
         print(f"    [pixel-agg]  mDice={mD_pix:.4f}  TLS={tls_pix:.4f}  GC={gc_pix:.4f}")
-        print(f"    TLS sp={tls_sp:.3f}  GC sp={gc_sp:.3f}")
+        print(f"    [counts vs gt]  TLS sp={tls_sp:.3f} mae={tls_mae:.2f}  "
+              f"GC sp={gc_sp:.3f} mae={gc_mae:.2f}")
+        print(f"    [post-proc] min_size={min_size}, closing_iters={close_iters}")
         print(f"    {per_slide_t:.2f}s/slide  selected {n_selected_total}/{n_total_total} "
               f"({100 * sel_frac:.1f}%)")
         for ct in sorted({r["cancer_type"] for r in per_slide}):
@@ -293,7 +712,10 @@ def main(cfg: DictConfig) -> None:
         rows.append({
             "threshold": thr, "mDice": mD, "tls_dice": tls_m, "gc_dice": gc_m,
             "mDice_pix": mD_pix, "tls_dice_pix": tls_pix, "gc_dice_pix": gc_pix,
-            "tls_sp": tls_sp, "gc_sp": gc_sp, "n_selected": n_selected_total,
+            "tls_sp": tls_sp, "gc_sp": gc_sp,
+            "tls_mae": tls_mae, "gc_mae": gc_mae,
+            "min_size": min_size, "closing_iters": close_iters,
+            "n_selected": n_selected_total,
             "n_total": n_total_total, "s_per_slide": per_slide_t,
         })
         if run is not None:

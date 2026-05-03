@@ -1,0 +1,9 @@
+# @package model
+# Stage 1 — GraphTLSDetector with GATv2 5-hop attention.
+# v3.8: more graph context to lift TLS recall on isolated ROIs.
+gnn_type: gatv2
+n_hops: 5
+hidden_dim: 256
+dropout: 0.1
+gat_heads: 4
+in_dim: 1536

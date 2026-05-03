@@ -1,0 +1,8 @@
+# @package model
+# v3.17 — GATv2 4-hop midpoint between v3.0 (3hop) and v3.8 (5hop).
+gnn_type: gatv2
+n_hops: 4
+hidden_dim: 256
+dropout: 0.1
+gat_heads: 4
+in_dim: 1536

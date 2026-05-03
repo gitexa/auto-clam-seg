@@ -1,0 +1,9 @@
+# @package model
+# Stage 1 — GATv2 3-hop with wider hidden dim (512 vs default 256).
+# v3.9: more graph context via width rather than depth.
+gnn_type: gatv2
+n_hops: 3
+hidden_dim: 512
+dropout: 0.1
+gat_heads: 4
+in_dim: 1536
