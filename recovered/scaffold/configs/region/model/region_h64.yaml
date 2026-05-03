@@ -1,0 +1,8 @@
+# @package model
+uni_dim: 1536
+gat_dim: 256
+hidden_channels: 64
+n_classes: 3
+grid_n: 3
+rgb_pretrained: true
+freeze_rgb_encoder: false
