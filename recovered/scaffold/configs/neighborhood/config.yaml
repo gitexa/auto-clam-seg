@@ -1,0 +1,31 @@
+defaults:
+  - model: neighborhood_h128
+  - train: neighborhood
+  - _self_
+
+stage: neighborhood
+label: v3.36_nbhd_h128
+seed: 42
+out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
+
+data:
+  cache_path: /home/ubuntu/local_data/tls_patch_dataset_min4096.pt
+  max_windows_per_slide: 64
+  tile_clusters: true
+  stride: 2
+
+wandb:
+  enabled: true
+  project: tls-pixel-seg
+  entity: null
+  mode: ${oc.env:WANDB_MODE,online}
+  tags: [v3, neighborhood, cascade-stage2]
+
+hydra:
+  run:
+    dir: ${out_root}/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+  sweep:
+    dir: ${out_root}/multirun/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+    subdir: ${hydra.job.num}_${hydra.job.override_dirname}
+  job:
+    chdir: false

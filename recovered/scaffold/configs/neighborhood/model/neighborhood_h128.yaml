@@ -1,0 +1,7 @@
+# @package model
+# v3.36 — NeighborhoodPixelDecoder, h=128 (matches v3.4b champion Stage 2 width).
+in_dim: 1536
+bottleneck: 512
+hidden_channels: 128
+spatial_size: 16
+n_classes: 3
