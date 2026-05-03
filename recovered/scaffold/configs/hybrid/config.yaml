@@ -1,0 +1,27 @@
+defaults:
+  - _self_
+stage: hybrid
+label: v3.26_hybrid
+seed: 42
+out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
+
+patchcls: ???
+stage2: ???
+s2_batch: 64
+min_component_size: 2
+closing_iters: 1
+min_tls_pixels: 4096
+patch_cache_path: /home/ubuntu/local_data/tls_patch_dataset_min4096.pt
+
+wandb:
+  enabled: true
+  project: tls-pixel-seg
+  entity: null
+  mode: ${oc.env:WANDB_MODE,online}
+  tags: [v3, hybrid]
+
+hydra:
+  run:
+    dir: ${out_root}/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+  job:
+    chdir: false
