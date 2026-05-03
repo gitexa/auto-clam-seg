@@ -1,0 +1,39 @@
+defaults:
+  - _self_
+stage: gncaf
+label: v3.21_gncaf_recovered
+seed: 42
+out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
+
+model:
+  dim: 384
+  encoder_layers: 6      # half of recovered (12) for budget
+  encoder_heads: 6
+  gcn_hops: 3
+  fusion_heads: 8
+  dropout: 0.0
+
+train:
+  lr: 5.0e-5
+  weight_decay: 1.0e-4
+  epochs: 15
+  patience: 5
+  warmup_epochs: 1
+  class_weights: [1.0, 5.0, 3.0]
+  max_pos_per_slide: 8
+  bg_per_pos: 1.0
+  num_workers: 8
+  amp: true
+
+wandb:
+  enabled: true
+  project: tls-pixel-seg
+  entity: null
+  mode: ${oc.env:WANDB_MODE,online}
+  tags: [v3, gncaf]
+
+hydra:
+  run:
+    dir: ${out_root}/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+  job:
+    chdir: false

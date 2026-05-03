@@ -1,0 +1,28 @@
+defaults:
+  - _self_
+stage: gncaf_eval
+label: v3.35_gncaf_full_eval
+seed: 42
+out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
+
+checkpoint: ???        # path to GNCAF best_checkpoint.pt
+batch_size: 16         # per-GPU forward batch
+num_workers: 8         # WSI tile reader workers
+min_component_size: 2
+closing_iters: 1
+limit_slides: null     # set to int for a quick smoke test
+slide_offset: 0        # for parallel sharding (process slides[offset::stride])
+slide_stride: 1
+
+wandb:
+  enabled: true
+  project: tls-pixel-seg
+  entity: null
+  mode: ${oc.env:WANDB_MODE,online}
+  tags: [v3, gncaf, eval, benchmark]
+
+hydra:
+  run:
+    dir: ${out_root}/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+  job:
+    chdir: false
