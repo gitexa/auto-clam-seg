@@ -115,6 +115,39 @@ from TCGA GDC, run `save_image_at_spacing.py` to convert to TIF
 (~3-5 min/slide × 160 = 8-13 h), then run
 `eval_gars_cascade.py ... use_test_split=true slide_offset=N slide_stride=4`.
 
+### Paper IoU 54.21 gap — open question
+
+The paper (Su et al. 2025) reports IoU = 54.21 ≈ Dice 0.703 for GNCAF.
+Our best per-positives Dice is 0.640 (v3.51). After investigating the
+recovered checkpoint we found that v3.50/v3.51 froze a randomly-
+initialized R50 trunk (weight norm 4.6 vs ImageNet's 11.95) — the
+paper's `freeze_cnn=True` requires loading pretrained weights *first*.
+
+v3.53 fixed this (loaded torchvision ImageNet R50 weights at init,
+added HFlip/VFlip/Rot90 augmentation, added 0.5×Dice term to CE), but
+the per-positives mDice **dropped** to 0.529 and slide-level pixel-agg
+to 0.295. Augmentation appears to destabilise GC training (multiple
+GC dice → 0 collapses during training).
+
+| | per-pos mDice | pix-agg mDice | per-pos IoU |
+|---|---|---|---|
+| v3.50 | 0.607 | **0.349** | 0.435 |
+| v3.51 (+ bg-only) | **0.640** | 0.322 | **0.471** |
+| v3.53 (+ R50/aug/Dice) | 0.529 | 0.295 | 0.360 |
+| **paper claim** | **0.703** | — | **0.542** |
+
+Remaining hypotheses for the paper gap (not all explored):
+1. Pretrained ViT-B/16 weights (TransUNet-specific, ImageNet-21k)
+2. Color/stain augmentation (we only used flips+rotations)
+3. Different evaluation protocol (paper may use a smaller positive
+   subset, different mIoU averaging)
+4. Higher patch resolution (we use 256×256)
+5. Different class-weight regime than [1, 5, 3]
+
+For deployment, the cascade (v3.37, mDice_pix=0.845) remains far ahead
+of any GNCAF variant on every slide-level metric. The paper-repro
+effort is primarily a benchmarking exercise.
+
 ### v3.51 — bg-only training slides ablation (negative result)
 
 A natural hypothesis was that GNCAF's slide-level collapse stems from
