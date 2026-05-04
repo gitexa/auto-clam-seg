@@ -115,6 +115,50 @@ from TCGA GDC, run `save_image_at_spacing.py` to convert to TIF
 (~3-5 min/slide × 160 = 8-13 h), then run
 `eval_gars_cascade.py ... use_test_split=true slide_offset=N slide_stride=4`.
 
+### v4.0 / v4.1 — end-to-end cascade joint training (negative result)
+
+User-requested experiment: can Stage 1's selection be refined via
+segmentation supervision from Stage 2? Both stages were jointly
+optimized, seeded from the v3.37 champion (Stage 1: GATv2 5-hop
+v3.8 ckpt; Stage 2: RegionDecoder v3.37 ckpt). Per-slide forward:
+Stage 1 picks top-K=6 by score → Stage 2 decodes K windows → loss
+backprops through both.
+
+| | mode | sel% | mDice_pix | TLS pix | GC pix |
+|---|---|---|---|---|---|
+| **v3.37 cascade (champion)** | independent train | ~0.7% | **0.845** | **0.822** | **0.868** |
+| v4.0 e2e soft-weighted | s1_score · L_s2 | **0.00%** | 0.343 | 0.000 | 0.686 |
+| v4.1 e2e hard top-K | unweighted L_s2 | 0.68% | 0.714 | 0.597 | 0.831 |
+
+**v4.0 broke Stage 1's threshold calibration**. The soft loss
+`s1_score · L_s2` lets the model minimize total loss by *lowering*
+s1_score on patches that decode poorly — this collapses the score
+distribution below 0.5. At deployment with thr=0.5, **0% of patches
+are selected** → no decoding → TLS dice = 0.
+
+**v4.1 (hard top-K, no soft weighting)** keeps calibration but doesn't
+beat v3.37. Stage 2 retrains on only K=6 windows per slide vs v3.37's
+51,829 pre-cached windows — an order of magnitude less segmentation
+supervision. Stage 1 stays effectively unchanged (BCE only, no segm
+gradient).
+
+**Conclusion**: end-to-end joint training as implemented does not
+improve over the independent-stage cascade. Two structural issues:
+
+1. *Soft weighting kills calibration.* Any future attempt needs
+   either (a) a regularizer that anchors Stage 1's score distribution
+   to the v3.8 baseline, (b) a fixed score-vs-threshold mapping
+   (e.g. percentile-rank instead of absolute score), or (c) Gumbel/ST
+   estimator with annealing.
+2. *Top-K=6 is too sparse for Stage 2 retraining.* The independent
+   v3.37 had 50× more windows. To train Stage 2 jointly, K needs to
+   approach the inference-time window count (~50 per slide), but that
+   makes each step ~9× more RGB I/O.
+
+For deployment, **v3.37 RegionDecoder cascade remains the champion**
+at mDice_pix=0.845. The e2e hypothesis tested negative; the cascade's
+two-stage independence is a feature, not a limitation.
+
 ### Paper IoU 54.21 gap — open question
 
 The paper (Su et al. 2025) reports IoU = 54.21 ≈ Dice 0.703 for GNCAF.
