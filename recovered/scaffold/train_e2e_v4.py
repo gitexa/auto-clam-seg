@@ -141,9 +141,11 @@ def _build_window(sample, center_idx, mask_z, wsi_z, graph_ctx):
             tile = torch.zeros(PATCH_SIZE, PATCH_SIZE, dtype=torch.long)
         else:
             mh, mw = mask_z.shape
-            ye, xe = min(y0 + PATCH_SIZE, mh), min(x0 + PATCH_SIZE, mw)
             tile_np = np.zeros((PATCH_SIZE, PATCH_SIZE), dtype=np.uint8)
-            tile_np[: ye - y0, : xe - x0] = np.asarray(mask_z[y0:ye, x0:xe])
+            if 0 <= y0 < mh and 0 <= x0 < mw:
+                ye = min(y0 + PATCH_SIZE, mh)
+                xe = min(x0 + PATCH_SIZE, mw)
+                tile_np[: ye - y0, : xe - x0] = np.asarray(mask_z[y0:ye, x0:xe])
             tile = torch.from_numpy(tile_np.astype(np.int64))
         mask[y0p:y0p + PATCH_SIZE, x0p:x0p + PATCH_SIZE] = tile
 
