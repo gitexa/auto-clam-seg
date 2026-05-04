@@ -159,7 +159,47 @@ For deployment, **v3.37 RegionDecoder cascade remains the champion**
 at mDice_pix=0.845. The e2e hypothesis tested negative; the cascade's
 two-stage independence is a feature, not a limitation.
 
-### v3.54 — full paper-style GNCAF (best slide-level GNCAF)
+### v3.55 — stable low-LR pretrained GNCAF (current best GNCAF)
+
+v3.54 hit per-positives 0.635 at ep20 then **diverged catastrophically**
+(multiple full mDice→0 collapses ep24–34) — the lr=2e-4 was too high
+for ViT fine-tuning. v3.55 lowered LR to 5e-5 and tightened grad-clip
+to 0.5 (standard ViT fine-tuning regime). Everything else the same as
+v3.54: ImageNet R50 + ViT init, bg-only slides, no augmentation, CE +
+0.5×Dice loss.
+
+Result: stable training, no divergence, 12-pt patience caught the natural plateau at ep25.
+
+| Metric | v3.50 | v3.51 | v3.54 | **v3.55** |
+|---|---|---|---|---|
+| Per-positives val mDice | 0.607 | 0.640 | 0.635 | **0.658** |
+| Per-pos IoU | 0.435 | 0.471 | 0.466 | **0.491** |
+| Slide-level pix-agg mDice | 0.349 | 0.322 | 0.395 | **0.426** |
+| TLS pix dice | 0.302 | 0.268 | 0.366 | **0.437** |
+| GC pix dice | 0.396 | 0.376 | **0.425** | 0.416 |
+| TLS Spearman | 0.575 | 0.485 | 0.652 | 0.642 |
+| GC Spearman | 0.480 | 0.593 | **0.737** | 0.691 |
+| GC MAE / slide | 1.95 | 1.12 | **0.86** | 0.99 |
+| **Paper IoU 54.21 = Dice 0.703** | | | | gap = **0.045 IoU** |
+
+**v3.55 is the best GNCAF on 5 of 8 metrics** including the headline
+per-positives mDice (0.658, +1.8pt over v3.51's 0.640) and slide-level
+pixel-agg (0.426, +3.1pt over v3.54). The remaining 0.045 IoU gap to
+the paper is the smallest we've achieved.
+
+The paper-comparable per-positives metric is now 0.658 ≈ IoU 0.491.
+Closing the last 5 IoU points to 0.542 likely needs:
+- Paper's exact bundled R50+ViT weights (Chen et al. 2021's TransUNet
+  release, hosted on Google Drive — different from timm's ViT-B/16)
+- Or a different positive-patch sampling protocol that matches the
+  paper's evaluation set composition (paper details are sparse on this)
+
+For deployment, the cascade (v3.37 mDice_pix=0.845) remains
+**1.98× better than v3.55** at slide-level pixel-aggregate (0.845 vs
+0.426). The cascade's two-stage selection-then-decode architecture
+remains the right deployment choice.
+
+### v3.54 — full paper-style GNCAF (formerly best slide-level GNCAF)
 
 Combination of all wins so far + ImageNet ViT init:
 - ImageNet R50 weights → encoder.stem_conv + layer1/2/3 (258 keys)

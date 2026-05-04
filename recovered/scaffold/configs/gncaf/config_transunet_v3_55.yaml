@@ -1,0 +1,56 @@
+defaults:
+  - _self_
+stage: gncaf
+label: v3.55_gncaf_transunet_lowlr
+seed: 42
+out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
+
+model:
+  hidden_size: 768
+  n_classes: 3
+  n_encoder_layers: 6
+  n_heads: 12
+  mlp_dim: 3072
+  n_hops: 3
+  n_fusion_layers: 1
+  feature_dim: 1536
+  dropout: 0.1
+
+# v3.55 = v3.54 with LR halved + tighter grad clip to fix the training
+# instability seen in v3.54 (multiple full mDice→0 collapses ep24–34).
+# Hypothesis: pretrained ViT diverges at lr=2e-4; ViT fine-tuning is
+# typically done at lr=1e-5 to 5e-5.  v3.54 best was ep20=0.635 right
+# before divergence — a stable run might extract more from the same
+# init.
+train:
+  lr: 5.0e-5              # 4× lower than v3.54
+  weight_decay: 1.0e-4
+  epochs: 60              # shorter; we expect convergence sooner with stable training
+  patience: 12
+  warmup_epochs: 5
+  class_weights: [1.0, 5.0, 3.0]
+  max_pos_per_slide: 16
+  bg_per_pos: 1.0
+  num_workers: 12
+  freeze_cnn: true
+  amp: true
+  grad_clip: 0.5          # tighter (was 1.0)
+  load_imagenet_r50: true
+  load_imagenet_vit: true
+  augment: false
+  dice_loss_weight: 0.5
+  include_negative_slides: true
+  neg_slide_targets: 8
+
+wandb:
+  enabled: true
+  project: tls-pixel-seg
+  entity: null
+  mode: ${oc.env:WANDB_MODE,online}
+  tags: [v3, gncaf, transunet, full-pretrained, low-lr, paper-repro]
+
+hydra:
+  run:
+    dir: ${out_root}/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+  job:
+    chdir: false
