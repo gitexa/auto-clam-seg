@@ -159,6 +159,44 @@ For deployment, **v3.37 RegionDecoder cascade remains the champion**
 at mDice_pix=0.845. The e2e hypothesis tested negative; the cascade's
 two-stage independence is a feature, not a limitation.
 
+### v3.54 — full paper-style GNCAF (best slide-level GNCAF)
+
+Combination of all wins so far + ImageNet ViT init:
+- ImageNet R50 weights → encoder.stem_conv + layer1/2/3 (258 keys)
+- ImageNet ViT-B/16 (timm `vit_base_patch16_224.augreg2_in21k_ft_in1k`)
+  → encoder.blocks[0..5] + final norm (74 keys)
+- bg-only training slides (v3.51 finding)
+- CE + 0.5×Dice loss (paper-standard)
+- **No augmentation** (rolled back v3.53; aug destabilises GC training)
+- 90 epoch schedule, patience 20
+
+| Metric | v3.50 | v3.51 | v3.53 | **v3.54** | Δ vs v3.50 |
+|---|---|---|---|---|---|
+| Per-positives val mDice | 0.607 | 0.640 | 0.529 | 0.635 | +0.028 |
+| Slide-level pix-agg mDice | 0.349 | 0.322 | 0.295 | **0.395** | **+0.046** |
+| TLS Spearman | 0.575 | 0.485 | — | **0.652** | +0.077 |
+| GC Spearman | 0.480 | 0.593 | — | **0.737** | +0.257 |
+| GC MAE / slide | 1.95 | 1.12 | — | **0.86** | −1.09 |
+
+**v3.54 is the best GNCAF on every slide-level metric** despite training
+instability (multiple full collapses to mDice=0 between epochs 24–34).
+Pretrained ViT helped at deployment scale even though per-positives
+gained only 2.8 pt. Best ckpt was at ep20 *before* the divergence;
+patience-20 caught the recovery and stopped at ep40.
+
+**Remaining gap to paper claim** (IoU 54.21 = Dice 0.703 per-pos):
+v3.54 per-pos Dice 0.635 = IoU 0.466. Still 0.076 IoU below paper.
+Possible remaining causes: different ViT pretrain source (paper used
+TransUNet's R50+ViT bundled weights, we used timm's separate R50 +
+ViT-B/16), different patch size (paper may use 224 vs our 256), or
+different evaluation protocol (paper may use a small high-quality
+subset for IoU reporting).
+
+For *deployment*, the cascade (v3.37 mDice_pix=0.845) is **2.1× better
+than the best GNCAF (v3.54 = 0.395)** on slide-level pixel-aggregate
+dice. The two-stage cascade architecture is fundamentally better-suited
+to whole-slide TLS/GC segmentation than the per-patch GNCAF decoder.
+
 ### Paper IoU 54.21 gap — open question
 
 The paper (Su et al. 2025) reports IoU = 54.21 ≈ Dice 0.703 for GNCAF.

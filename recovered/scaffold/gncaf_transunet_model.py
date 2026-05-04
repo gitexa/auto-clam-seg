@@ -205,6 +205,72 @@ def load_imagenet_r50_into_encoder(encoder: "TransUNetEncoder") -> tuple[int, in
     return loaded, skipped
 
 
+def load_imagenet_vit_into_encoder(encoder: "TransUNetEncoder",
+                                   timm_model: str = "vit_base_patch16_224"
+                                   ) -> tuple[int, int]:
+    """Load timm ImageNet-pretrained ViT-B/16 weights into a
+    TransUNetEncoder's transformer blocks (blocks[0..N-1] + norm).
+
+    Mapping handles two name-scheme differences between timm and our
+    nn.MultiheadAttention-based blocks:
+      timm.blocks.X.attn.qkv.{weight,bias} → our.blocks.X.attn.in_proj_{weight,bias}
+      timm.blocks.X.attn.proj.{weight,bias} → our.blocks.X.attn.out_proj.{weight,bias}
+      timm.blocks.X.mlp.fc1.{weight,bias}  → our.blocks.X.mlp.0.{weight,bias}
+      timm.blocks.X.mlp.fc2.{weight,bias}  → our.blocks.X.mlp.3.{weight,bias}
+      timm.blocks.X.norm1/2.{weight,bias}  → our.blocks.X.norm1/2.{weight,bias}
+      timm.norm.{weight,bias}               → our.norm.{weight,bias}
+
+    pos_embed and patch_embed.proj are SKIPPED (token grid + patch
+    embedding shapes differ; ours is 1×1 from R50 features, not
+    16×16 from raw RGB).
+
+    Returns (n_loaded, n_skipped) for diagnostics.
+    """
+    import timm
+    src_model = timm.create_model(timm_model, pretrained=True, num_classes=0)
+    src = src_model.state_dict()
+    target = encoder.state_dict()
+
+    def _copy(src_key: str, dst_key: str) -> bool:
+        if src_key in src and dst_key in target and src[src_key].shape == target[dst_key].shape:
+            target[dst_key] = src[src_key].clone()
+            return True
+        return False
+
+    loaded = skipped = 0
+    n_blocks = len(encoder.blocks)
+    for i in range(n_blocks):
+        pairs = [
+            (f"blocks.{i}.norm1.weight",         f"blocks.{i}.norm1.weight"),
+            (f"blocks.{i}.norm1.bias",           f"blocks.{i}.norm1.bias"),
+            (f"blocks.{i}.norm2.weight",         f"blocks.{i}.norm2.weight"),
+            (f"blocks.{i}.norm2.bias",           f"blocks.{i}.norm2.bias"),
+            (f"blocks.{i}.attn.qkv.weight",      f"blocks.{i}.attn.in_proj_weight"),
+            (f"blocks.{i}.attn.qkv.bias",        f"blocks.{i}.attn.in_proj_bias"),
+            (f"blocks.{i}.attn.proj.weight",     f"blocks.{i}.attn.out_proj.weight"),
+            (f"blocks.{i}.attn.proj.bias",       f"blocks.{i}.attn.out_proj.bias"),
+            (f"blocks.{i}.mlp.fc1.weight",       f"blocks.{i}.mlp.0.weight"),
+            (f"blocks.{i}.mlp.fc1.bias",         f"blocks.{i}.mlp.0.bias"),
+            (f"blocks.{i}.mlp.fc2.weight",       f"blocks.{i}.mlp.3.weight"),
+            (f"blocks.{i}.mlp.fc2.bias",         f"blocks.{i}.mlp.3.bias"),
+        ]
+        for s, d in pairs:
+            if _copy(s, d):
+                loaded += 1
+            else:
+                skipped += 1
+
+    # Final layernorm.
+    for s, d in [("norm.weight", "norm.weight"), ("norm.bias", "norm.bias")]:
+        if _copy(s, d):
+            loaded += 1
+        else:
+            skipped += 1
+
+    encoder.load_state_dict(target, strict=False)
+    return loaded, skipped
+
+
 # ─── GCN context ──────────────────────────────────────────────────────
 
 

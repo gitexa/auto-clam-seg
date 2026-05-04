@@ -1,0 +1,60 @@
+defaults:
+  - _self_
+stage: gncaf
+label: v3.54_gncaf_transunet_full
+seed: 42
+out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
+
+# Architecture (paper-faithful)
+model:
+  hidden_size: 768
+  n_classes: 3
+  n_encoder_layers: 6
+  n_heads: 12
+  mlp_dim: 3072
+  n_hops: 3
+  n_fusion_layers: 1
+  feature_dim: 1536
+  dropout: 0.1
+
+# v3.54 = "full paper-style" GNCAF training:
+#   * load_imagenet_r50:  ImageNet R50 weights → encoder.stem_conv + layer1/2/3
+#   * load_imagenet_vit:  timm ImageNet ViT-B/16 weights → encoder.blocks[0..5]
+#                          (token grid pos_embed/patch_embed differ — skipped)
+#   * include_negative_slides:  bg-only training slides (v3.51 finding)
+#   * NO augmentation:  v3.53 showed flips/rot destabilise GC training
+#   * Dice loss 0.5:    paper-standard CE + 0.5×Dice
+#   * Long schedule:    90 epochs / patience 20 to give pretrained encoders
+#                       enough epochs to converge from a good init
+train:
+  lr: 2.0e-4              # slightly lower; pretrained init starts close to a basin
+  weight_decay: 1.0e-4
+  epochs: 90
+  patience: 20
+  warmup_epochs: 5
+  class_weights: [1.0, 5.0, 3.0]
+  max_pos_per_slide: 16
+  bg_per_pos: 1.0
+  num_workers: 12
+  freeze_cnn: true
+  amp: true
+  grad_clip: 1.0
+  load_imagenet_r50: true
+  load_imagenet_vit: true
+  augment: false           # rollback v3.53; aug destabilised GC
+  dice_loss_weight: 0.5
+  include_negative_slides: true
+  neg_slide_targets: 8
+
+wandb:
+  enabled: true
+  project: tls-pixel-seg
+  entity: null
+  mode: ${oc.env:WANDB_MODE,online}
+  tags: [v3, gncaf, transunet, full-pretrained, paper-repro]
+
+hydra:
+  run:
+    dir: ${out_root}/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+  job:
+    chdir: false

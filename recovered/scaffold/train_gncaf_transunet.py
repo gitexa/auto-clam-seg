@@ -142,6 +142,12 @@ def main(cfg: DictConfig) -> None:
         loaded, skipped = load_imagenet_r50_into_encoder(model.encoder)
         print(f"  loaded ImageNet R50 weights: {loaded} loaded, {skipped} skipped")
 
+    # Load ImageNet-pretrained ViT weights into the encoder transformer.
+    if cfg.train.get("load_imagenet_vit", False):
+        from gncaf_transunet_model import load_imagenet_vit_into_encoder
+        loaded, skipped = load_imagenet_vit_into_encoder(model.encoder)
+        print(f"  loaded ImageNet ViT weights: {loaded} loaded, {skipped} skipped")
+
     # Optionally freeze the R50 trunk (paper config: freeze_cnn=True).
     if cfg.train.get("freeze_cnn", True):
         for n, p in model.encoder.named_parameters():
