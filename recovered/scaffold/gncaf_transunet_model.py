@@ -160,6 +160,51 @@ class TransUNetEncoder(nn.Module):
         return tokens, (s_stem, s_layer1, s_layer2)
 
 
+def load_imagenet_r50_into_encoder(encoder: "TransUNetEncoder") -> tuple[int, int]:
+    """Load torchvision ImageNet-pretrained ResNet50 weights into a
+    TransUNetEncoder's R50 trunk (stem + layer1/2/3). Returns
+    (n_loaded, n_skipped) for diagnostics. layer4 + ViT not touched.
+    """
+    import torchvision
+    src = torchvision.models.resnet50(
+        weights=torchvision.models.ResNet50_Weights.IMAGENET1K_V1
+    ).state_dict()
+    target = encoder.state_dict()
+
+    def _copy(src_key: str, dst_key: str) -> bool:
+        if src_key in src and dst_key in target and src[src_key].shape == target[dst_key].shape:
+            target[dst_key] = src[src_key].clone()
+            return True
+        return False
+
+    loaded = skipped = 0
+    # stem: conv1.* → stem_conv.0.*; bn1.* → stem_conv.1.*
+    for src_k, dst_k in [
+        ("conv1.weight", "stem_conv.0.weight"),
+        ("bn1.weight", "stem_conv.1.weight"),
+        ("bn1.bias", "stem_conv.1.bias"),
+        ("bn1.running_mean", "stem_conv.1.running_mean"),
+        ("bn1.running_var", "stem_conv.1.running_var"),
+        ("bn1.num_batches_tracked", "stem_conv.1.num_batches_tracked"),
+    ]:
+        if _copy(src_k, dst_k):
+            loaded += 1
+        else:
+            skipped += 1
+
+    # layers 1-3 share key shape
+    for layer_name in ("layer1", "layer2", "layer3"):
+        for src_k in [k for k in src if k.startswith(f"{layer_name}.")]:
+            dst_k = src_k  # same name
+            if _copy(src_k, dst_k):
+                loaded += 1
+            else:
+                skipped += 1
+
+    encoder.load_state_dict(target, strict=False)
+    return loaded, skipped
+
+
 # ─── GCN context ──────────────────────────────────────────────────────
 
 

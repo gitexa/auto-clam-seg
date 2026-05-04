@@ -1,0 +1,48 @@
+defaults:
+  - _self_
+
+stage: e2e
+label: v4.0_e2e_soft
+seed: 42
+out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
+
+# Stage 1 init: 5-hop GATv2 (matches v3.37 cascade champion's Stage 1).
+stage1: /home/ubuntu/ahaas-persistent-std-tcga/experiments/gars_stage1_v3.8_gatv2_5hop_20260501_043445/best_checkpoint.pt
+
+# Stage 2 init: optionally seed from v3.37 RegionDecoder.
+stage2_init: /home/ubuntu/ahaas-persistent-std-tcga/experiments/gars_region_v3.37_full_20260502_144124/best_checkpoint.pt
+
+model:
+  gat_dim: 256
+  hidden_channels: 64
+
+# v4.0: SOFT weighting. Stage 1's continuous score multiplies Stage 2's
+# per-patch loss → gradient flows back into Stage 1, refining selection
+# based on what Stage 2 actually segments well.
+train:
+  s1_lr: 5.0e-5         # smaller LR on pre-trained Stage 1
+  s2_lr: 1.0e-4         # smaller LR on pre-trained Stage 2 (vs 3e-4 fresh)
+  weight_decay: 1.0e-4
+  epochs: 30
+  patience: 8
+  warmup_epochs: 2
+  class_weights: [1.0, 5.0, 3.0]
+  num_workers: 8
+  grad_clip: 1.0
+  dice_loss_weight: 0.5
+  lambda_s2: 1.0        # weight of Stage 2 loss vs Stage 1 BCE
+  top_k: 16             # K patches per slide per step
+  e2e_mode: soft        # soft|hard
+
+wandb:
+  enabled: true
+  project: tls-pixel-seg
+  entity: null
+  mode: ${oc.env:WANDB_MODE,online}
+  tags: [v4, e2e, cascade-joint, soft-weighted]
+
+hydra:
+  run:
+    dir: ${out_root}/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+  job:
+    chdir: false

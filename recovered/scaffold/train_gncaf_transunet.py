@@ -136,6 +136,12 @@ def main(cfg: DictConfig) -> None:
     print(f"GNCAFPixelDecoder params: " +
           ", ".join(f"{k}={v:,}" for k, v in summary.items()))
 
+    # Load ImageNet-pretrained R50 weights into the encoder trunk.
+    if cfg.train.get("load_imagenet_r50", False):
+        from gncaf_transunet_model import load_imagenet_r50_into_encoder
+        loaded, skipped = load_imagenet_r50_into_encoder(model.encoder)
+        print(f"  loaded ImageNet R50 weights: {loaded} loaded, {skipped} skipped")
+
     # Optionally freeze the R50 trunk (paper config: freeze_cnn=True).
     if cfg.train.get("freeze_cnn", True):
         for n, p in model.encoder.named_parameters():
@@ -145,6 +151,42 @@ def main(cfg: DictConfig) -> None:
         print(f"  froze R50 trunk ({n_frozen:,} params)")
 
     cw = torch.tensor(cfg.train.class_weights, dtype=torch.float32, device=device)
+
+    def soft_dice_loss(logits: torch.Tensor, target: torch.Tensor,
+                       n_classes: int = 3, eps: float = 1e-6) -> torch.Tensor:
+        """Soft multiclass dice — averages over foreground classes (1, 2)."""
+        probs = F.softmax(logits, dim=1)               # (B, C, H, W)
+        target_oh = F.one_hot(target.clamp(0, n_classes - 1), n_classes)  # (B,H,W,C)
+        target_oh = target_oh.permute(0, 3, 1, 2).float()
+        dims = (0, 2, 3)
+        per_class_dice = []
+        for c in (1, 2):
+            inter = (probs[:, c] * target_oh[:, c]).sum(dim=(1, 2))
+            denom = probs[:, c].sum(dim=(1, 2)) + target_oh[:, c].sum(dim=(1, 2))
+            d = (2 * inter + eps) / (denom + eps)
+            per_class_dice.append(d)
+        return 1.0 - torch.stack(per_class_dice).mean()
+
+    dice_w = float(cfg.train.get("dice_loss_weight", 0.0))
+
+    def augment_pair(rgb: torch.Tensor, mask: torch.Tensor):
+        """Mirror RGB+mask through random flip + 90° rotation. Per-batch."""
+        if torch.rand(1).item() < 0.5:
+            rgb = torch.flip(rgb, dims=[-1])
+            mask = torch.flip(mask, dims=[-1])
+        if torch.rand(1).item() < 0.5:
+            rgb = torch.flip(rgb, dims=[-2])
+            mask = torch.flip(mask, dims=[-2])
+        k = int(torch.randint(0, 4, (1,)).item())
+        if k:
+            rgb = torch.rot90(rgb, k, dims=[-2, -1])
+            mask = torch.rot90(mask, k, dims=[-2, -1])
+        return rgb, mask
+
+    use_aug = bool(cfg.train.get("augment", False))
+    print(f"  loss: CE(weight={cfg.train.class_weights}) + {dice_w}×Dice"
+          f"  augment={use_aug}")
+
     opt = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
         lr=cfg.train.lr, weight_decay=cfg.train.weight_decay,
@@ -178,11 +220,15 @@ def main(cfg: DictConfig) -> None:
                 target_idx = s["target_idx"].to(device, non_blocking=True)
                 target_rgb = s["target_rgb"].to(device, non_blocking=True)
                 target_mask = s["target_mask"].to(device, non_blocking=True)
+                if use_aug:
+                    target_rgb, target_mask = augment_pair(target_rgb, target_mask)
                 try:
                     if scaler is not None:
                         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
                             logits = model(target_rgb, features, target_idx, edge_index)
                             loss = F.cross_entropy(logits, target_mask, weight=cw)
+                            if dice_w > 0:
+                                loss = loss + dice_w * soft_dice_loss(logits, target_mask)
                         opt.zero_grad(set_to_none=True)
                         scaler.scale(loss).backward()
                         if cfg.train.get("grad_clip", 0) > 0:
@@ -195,6 +241,8 @@ def main(cfg: DictConfig) -> None:
                     else:
                         logits = model(target_rgb, features, target_idx, edge_index)
                         loss = F.cross_entropy(logits, target_mask, weight=cw)
+                        if dice_w > 0:
+                            loss = loss + dice_w * soft_dice_loss(logits, target_mask)
                         opt.zero_grad(set_to_none=True)
                         loss.backward()
                         if cfg.train.get("grad_clip", 0) > 0:
