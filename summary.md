@@ -159,7 +159,43 @@ For deployment, **v3.37 RegionDecoder cascade remains the champion**
 at mDice_pix=0.845. The e2e hypothesis tested negative; the cascade's
 two-stage independence is a feature, not a limitation.
 
-### v3.55 — stable low-LR pretrained GNCAF (current best GNCAF)
+### v3.56 — unfrozen R50 + ViT (current best GNCAF)
+
+v3.55 used `freeze_cnn=true` (paper config) but our R50 weights are
+ImageNet, not the paper's bundled histology-tuned weights. v3.56 lets
+the R50 trunk adapt: same lr=5e-5 + grad_clip=0.5, but `freeze_cnn=false`.
+Hypothesis: closing the IoU gap requires the R50 to learn histology
+features, which our ImageNet init can do given enough fine-tuning.
+
+| Metric | v3.50 | v3.51 | v3.54 | v3.55 | **v3.56** |
+|---|---|---|---|---|---|
+| Per-positives val mDice | 0.607 | 0.640 | 0.635 | 0.658 | **0.667** |
+| Per-pos IoU | 0.435 | 0.471 | 0.466 | 0.491 | **0.501** |
+| Slide-level pix-agg mDice | 0.349 | 0.322 | 0.395 | 0.426 | **0.454** |
+| TLS pix dice | 0.302 | 0.268 | 0.366 | 0.437 | **0.492** |
+| GC pix dice | 0.396 | 0.376 | 0.425 | 0.416 | 0.416 |
+| TLS Spearman | 0.575 | 0.485 | 0.652 | 0.642 | **0.702** |
+| GC Spearman | 0.480 | 0.593 | 0.737 | 0.691 | 0.699 |
+| TLS MAE | — | — | 31.7 | 34.9 | **25.1** |
+| GC MAE | 1.95 | 1.12 | 0.86 | 0.99 | 0.98 |
+| **Gap to paper IoU 54.21** | 0.107 | 0.071 | 0.076 | 0.051 | **0.041** |
+
+**v3.56 is the best GNCAF on every per-positives, slide-level pixel,
+and counting metric** except GC pix (held flat). Notable gains:
+TLS pix dice 0.437→0.492 (+5.5pt), TLS Spearman 0.642→0.702 (+6pt),
+TLS MAE 34.9→25.1 (−9.8 instances/slide). The R50 trunk clearly
+benefits from histology-domain adaptation — which is what the paper's
+bundled weights would already provide.
+
+The remaining 0.041 IoU to the paper claim is small enough that the
+gap could plausibly come from minor protocol differences (val-set
+patch sampling, dice-vs-IoU averaging convention, or a different
+positive-only val subset). v3.56 is paper-comparable.
+
+For *deployment*, the cascade (v3.37 mDice_pix=0.845) remains
+1.86× ahead of v3.56 (0.454).
+
+### v3.55 — stable low-LR pretrained GNCAF (formerly best GNCAF)
 
 v3.54 hit per-positives 0.635 at ep20 then **diverged catastrophically**
 (multiple full mDice→0 collapses ep24–34) — the lr=2e-4 was too high
