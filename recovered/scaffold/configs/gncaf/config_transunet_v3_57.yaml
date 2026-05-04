@@ -1,0 +1,52 @@
+defaults:
+  - _self_
+stage: gncaf
+label: v3.57_gncaf_transunet_vit12
+seed: 42
+out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
+
+# v3.57 = v3.56 + 12-layer ViT (paper-faithful depth). timm ViT-B/16
+# has exactly 12 blocks, so we load all 12 instead of just the first 6.
+model:
+  hidden_size: 768
+  n_classes: 3
+  n_encoder_layers: 12     # ← v3.57 change (was 6)
+  n_heads: 12
+  mlp_dim: 3072
+  n_hops: 3
+  n_fusion_layers: 1
+  feature_dim: 1536
+  dropout: 0.1
+
+train:
+  lr: 5.0e-5
+  weight_decay: 1.0e-4
+  epochs: 60
+  patience: 12
+  warmup_epochs: 5
+  class_weights: [1.0, 5.0, 3.0]
+  max_pos_per_slide: 12    # ← reduced from 16 (12-layer ViT uses ~2× memory)
+  bg_per_pos: 1.0
+  num_workers: 12
+  freeze_cnn: false
+  amp: true
+  grad_clip: 0.5
+  load_imagenet_r50: true
+  load_imagenet_vit: true
+  augment: false
+  dice_loss_weight: 0.5
+  include_negative_slides: true
+  neg_slide_targets: 8
+
+wandb:
+  enabled: true
+  project: tls-pixel-seg
+  entity: null
+  mode: ${oc.env:WANDB_MODE,online}
+  tags: [v3, gncaf, transunet, vit12, paper-faithful-depth]
+
+hydra:
+  run:
+    dir: ${out_root}/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+  job:
+    chdir: false

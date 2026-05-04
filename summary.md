@@ -159,7 +159,41 @@ For deployment, **v3.37 RegionDecoder cascade remains the champion**
 at mDice_pix=0.845. The e2e hypothesis tested negative; the cascade's
 two-stage independence is a feature, not a limitation.
 
-### v3.56 — unfrozen R50 + ViT (current best GNCAF)
+### v3.57 — 12-layer ViT (paper-faithful depth; closest to paper IoU)
+
+v3.56 used a 6-layer ViT; the paper's TransUNet is ViT-B/16 (12 layers).
+v3.57 doubled the depth (108M params total vs 65M) and loaded all 12
+timm ViT-B/16 blocks. Everything else identical to v3.56.
+
+Result: **per-positives mDice 0.689 (IoU 0.526)** — closest to the
+paper's claimed IoU 0.542 (gap = **0.016 IoU**, ~3% relative).
+
+But: **slide-level pixel-agg dropped** to 0.380 (vs v3.56's 0.454).
+The deeper transformer trades slide-level robustness for per-positive
+precision. Larger model is more expressive when shown only positive
+patches, but overfits the per-positive task and produces noisier masks
+on bg patches at deployment scale.
+
+| Metric | v3.55 (6L) | **v3.56 (6L)** | **v3.57 (12L)** | Paper |
+|---|---|---|---|---|
+| Per-positives val mDice | 0.658 | 0.667 | **0.689** | 0.703 |
+| Per-pos IoU | 0.491 | 0.501 | **0.526** | 0.542 |
+| Slide-level pix-agg mDice | 0.426 | **0.454** | 0.380 | — |
+| TLS pix dice | 0.437 | **0.492** | 0.369 | — |
+| GC pix dice | 0.416 | **0.416** | 0.392 | — |
+| TLS Spearman | 0.642 | **0.702** | 0.601 | — |
+| GC MAE | 0.99 | **0.98** | 1.02 | — |
+| s/slide | 108 | 107 | 166 | — |
+| Params | 65M | 65M | 108M | — |
+
+**Two sweet spots emerged:**
+- **Paper benchmarking**: v3.57 (12L) — Dice 0.689 / IoU 0.526, gap to paper claim is 0.016 IoU
+- **Deployment**: v3.56 (6L unfrozen) — pix-agg 0.454, fastest GNCAF (107s/slide), best on every count metric
+
+For deployment, the cascade champion v3.37 still outperforms v3.56 by
+1.86× (0.845 vs 0.454).
+
+### v3.56 — unfrozen R50 + ViT (formerly best slide-level GNCAF)
 
 v3.55 used `freeze_cnn=true` (paper config) but our R50 weights are
 ImageNet, not the paper's bundled histology-tuned weights. v3.56 lets
