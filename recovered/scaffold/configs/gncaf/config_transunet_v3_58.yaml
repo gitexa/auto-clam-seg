@@ -1,0 +1,53 @@
+defaults:
+  - _self_
+stage: gncaf
+label: v3.58_gncaf_transunet_vit12_aug
+seed: 42
+out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
+
+# v3.58 = v3.57 + augmentation back. v3.53 showed aug destabilises GC
+# at lr=2e-4, but v3.55+ proved lr=5e-5 is stable. Retest aug at the
+# stable LR — it may now help generalization, especially on GC.
+model:
+  hidden_size: 768
+  n_classes: 3
+  n_encoder_layers: 12
+  n_heads: 12
+  mlp_dim: 3072
+  n_hops: 3
+  n_fusion_layers: 1
+  feature_dim: 1536
+  dropout: 0.1
+
+train:
+  lr: 5.0e-5
+  weight_decay: 1.0e-4
+  epochs: 60
+  patience: 12
+  warmup_epochs: 5
+  class_weights: [1.0, 5.0, 3.0]
+  max_pos_per_slide: 12
+  bg_per_pos: 1.0
+  num_workers: 12
+  freeze_cnn: false
+  amp: true
+  grad_clip: 0.5
+  load_imagenet_r50: true
+  load_imagenet_vit: true
+  augment: true            # ← v3.58 change (was false in v3.57)
+  dice_loss_weight: 0.5
+  include_negative_slides: true
+  neg_slide_targets: 8
+
+wandb:
+  enabled: true
+  project: tls-pixel-seg
+  entity: null
+  mode: ${oc.env:WANDB_MODE,online}
+  tags: [v3, gncaf, transunet, vit12, augmented, paper-repro]
+
+hydra:
+  run:
+    dir: ${out_root}/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+  job:
+    chdir: false
