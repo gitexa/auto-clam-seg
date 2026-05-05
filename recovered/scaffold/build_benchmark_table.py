@@ -251,9 +251,10 @@ def main():
         for k in v358:
             if k in d0 and isinstance(d0[k], (int, float)):
                 v358[k].append(d0[k])
-    # Folds 1..4
+    # Folds 1..4 — combine_gncaf_shards.py writes to <prefix-stripped>_combined.json,
+    # so v3.58_5fold_fold1_eval_shard{0..3}.combined → v3.58_5fold_fold1_combined.json
     for fold in range(1, 5):
-        d = collect_gncaf_fold(f"v3.58_5fold_fold{fold}_eval_shard")
+        d = collect_gncaf_fold(f"v3.58_5fold_fold{fold}")
         if d is None:
             continue
         for k in v358:
@@ -268,7 +269,7 @@ def main():
             if k in d0 and isinstance(d0[k], (int, float)):
                 v356[k].append(d0[k])
     for fold in range(1, 5):
-        d = collect_gncaf_fold(f"v3.56_5fold_fold{fold}_eval_shard")
+        d = collect_gncaf_fold(f"v3.56_5fold_fold{fold}")
         if d is None:
             continue
         for k in v356:
