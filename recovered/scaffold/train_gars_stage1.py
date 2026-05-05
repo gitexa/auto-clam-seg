@@ -243,9 +243,18 @@ def main(cfg: DictConfig) -> None:
     entries = ps.build_slide_entries()
     if cfg.train.data_fraction < 1.0:
         entries = ps.subsample_entries(entries, cfg.train.data_fraction, cfg.seed)
-    folds_pair, _test = ps.create_splits(entries, k_folds=cfg.train.k_folds, seed=cfg.seed)
-    val_entries, train_entries = folds_pair[0], folds_pair[1]
-    print(f"Split: {len(train_entries)} train, {len(val_entries)} val")
+    fold_idx = int(cfg.train.get("fold_idx", 0))
+    if cfg.train.k_folds == 1 and fold_idx == 0:
+        folds_pair, _test = ps.create_splits(entries, k_folds=1, seed=cfg.seed)
+        val_entries, train_entries = folds_pair[0], folds_pair[1]
+    else:
+        all_folds, _test = ps.create_splits(entries, k_folds=5, seed=cfg.seed)
+        if fold_idx < 0 or fold_idx >= len(all_folds):
+            raise ValueError(f"fold_idx={fold_idx} out of range")
+        val_entries = all_folds[fold_idx]
+        train_entries = [s for i, f in enumerate(all_folds) if i != fold_idx for s in f]
+    print(f"Split: {len(train_entries)} train, {len(val_entries)} val "
+          f"(fold_idx={fold_idx}, k_folds={cfg.train.k_folds}, seed={cfg.seed})")
 
     print("Building mask cache...")
     mask_dict = ps.build_mask_cache(train_entries + val_entries, cfg.train.upsample_factor)

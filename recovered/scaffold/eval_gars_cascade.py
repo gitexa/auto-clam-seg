@@ -524,13 +524,23 @@ def main(cfg: DictConfig) -> None:
 
     ps.set_seed(cfg.seed)
     entries = ps.build_slide_entries()
-    folds_pair, test_entries = ps.create_splits(entries, k_folds=1, seed=cfg.seed)
+    fold_idx = int(cfg.get("fold_idx", 0))
+    k_folds = int(cfg.get("k_folds", 1))
     if cfg.get("use_test_split", False):
+        _folds, test_entries = ps.create_splits(entries, k_folds=1, seed=cfg.seed)
         val_entries = [e for e in test_entries if e.get("mask_path") is not None]
         print(f"Using TEST split: {len(val_entries)} slides with masks")
-    else:
+    elif k_folds == 1 and fold_idx == 0:
+        folds_pair, _test = ps.create_splits(entries, k_folds=1, seed=cfg.seed)
         val_entries = folds_pair[0]
         val_entries = [e for e in val_entries if e.get("mask_path") is not None]
+    else:
+        all_folds, _test = ps.create_splits(entries, k_folds=5, seed=cfg.seed)
+        if fold_idx < 0 or fold_idx >= len(all_folds):
+            raise ValueError(f"fold_idx={fold_idx} out of range")
+        val_entries = [e for e in all_folds[fold_idx] if e.get("mask_path") is not None]
+        print(f"Using fold {fold_idx} as val "
+              f"(seed={cfg.seed}, k_folds={k_folds}, {len(val_entries)} mask slides)")
     if cfg.get("limit_slides"):
         val_entries = val_entries[: int(cfg.limit_slides)]
         print(f"  limit_slides={cfg.limit_slides}")

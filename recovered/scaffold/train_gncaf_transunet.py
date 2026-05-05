@@ -93,7 +93,11 @@ def main(cfg: DictConfig) -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    train_entries, val_entries = build_gncaf_split()
+    train_entries, val_entries = build_gncaf_split(
+        seed=cfg.seed,
+        k_folds=cfg.get("k_folds", 5),
+        fold_idx=cfg.get("fold_idx", 0),
+    )
     pos_lookup = build_pos_lookup()
 
     train_ds = GNCAFFastDataset(

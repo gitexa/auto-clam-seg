@@ -275,13 +275,49 @@ class NeighborhoodTilesDataset(Dataset):
 
 
 def slide_level_split_windows(
-    bundle: dict[str, Any], val_frac: float = 0.157, seed: int = 42
+    bundle: dict[str, Any], val_frac: float = 0.157, seed: int = 42,
+    k_folds: int = 1, fold_idx: int = 0,
 ) -> tuple[set[str], set[str], int]:
     """Patient-level split over the unique slide_ids in the bundle.
+
+    Two modes:
+      * Legacy (default, k_folds=1, fold_idx=0): random shuffle of
+        patients, take val_frac as val.
+      * Fold-based (k_folds>1 OR fold_idx>0): use the same patient-
+        stratified 5-fold partition as `ps.create_splits` (seed=42 by
+        default — must match Stage 1 / GNCAF), then pick fold_idx as
+        val. This is the only way to align Stage 2 windows with Stage
+        1's val set for cross-validation.
+
     Returns (train_short_ids, val_short_ids, n_val_patients).
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from tls_patch_dataset import patient_id_from_slide
+
+    if k_folds > 1 or fold_idx > 0:
+        # Aligned fold split — call ps.create_splits exactly as Stage 1 does.
+        entries = ps.build_slide_entries()
+        all_folds, _test = ps.create_splits(entries, k_folds=5, seed=seed)
+        if fold_idx < 0 or fold_idx >= len(all_folds):
+            raise ValueError(f"fold_idx={fold_idx} out of range")
+        val_entries = all_folds[fold_idx]
+        train_entries = [s for i, f in enumerate(all_folds) if i != fold_idx for s in f]
+
+        bundle_slides = set(bundle["slide_ids"])
+        val: set[str] = set(); train: set[str] = set()
+        for e in val_entries:
+            if e["slide_id"] in bundle_slides:
+                val.add(e["slide_id"].split(".")[0])
+        for e in train_entries:
+            if e["slide_id"] in bundle_slides:
+                train.add(e["slide_id"].split(".")[0])
+        n_val_p = len({"-".join(e["slide_id"].split("-")[:3])
+                       for e in val_entries if e["slide_id"] in bundle_slides})
+        print(f"  Fold-aligned split: {len(train)} train, {len(val)} val "
+              f"slides ({n_val_p} val patients) [k_folds={k_folds}, fold_idx={fold_idx}]")
+        return train, val, n_val_p
+
+    # Legacy path
     short_ids = sorted({s.split(".")[0] for s in bundle["slide_ids"]})
     full_ids = sorted({s for s in bundle["slide_ids"]})
     patients = sorted({patient_id_from_slide(s) for s in full_ids})

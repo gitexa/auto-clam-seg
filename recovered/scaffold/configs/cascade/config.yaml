@@ -3,6 +3,8 @@
 stage: cascade
 label: v3.2_thr_sweep
 seed: 42
+k_folds: 5         # 1=legacy fold-0, 5=cross-validation
+fold_idx: 0        # 0..4 — which fold to evaluate against
 out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
 
 stage1: ???    # path to Stage 1 best_checkpoint.pt (REQUIRED)

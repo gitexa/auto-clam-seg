@@ -7,7 +7,8 @@ patience: 10
 pos_weight: 5.0
 upsample_factor: 4
 patch_size: 256
-k_folds: 1
+k_folds: 1                    # 1=legacy fold-0 only, 5=cross-validation
+fold_idx: 0                   # 0..4 — selects val fold when k_folds > 1
 data_fraction: 1.0
 num_workers: 4         # async prefetch for slide-level data loading
 prefetch_factor: 2

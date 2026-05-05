@@ -3,6 +3,8 @@ defaults:
 stage: gncaf
 label: v3.56_gncaf_transunet_unfrozen
 seed: 42
+k_folds: 5
+fold_idx: 0
 out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
 
 model:

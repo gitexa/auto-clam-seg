@@ -254,10 +254,14 @@ class GNCAFSlideDataset(torch.utils.data.Dataset):
 
 def build_gncaf_split(
     seed: int = 42, k_folds: int = 1, use_local_ssd: bool = True,
-    skip_test_patients: bool = True,
+    skip_test_patients: bool = True, fold_idx: int = 0,
 ) -> tuple[list[dict], list[dict]]:
-    """Apply our standard test-patient exclusion + 5-fold patient-stratified
-    split, then return (train_entries, val_entries).
+    """Apply our standard test-patient exclusion + patient-stratified
+    5-fold split, then return (train_entries, val_entries).
+
+    fold_idx selects which fold is used as val (0..4). Default 0
+    matches the historical behaviour. Pass fold_idx>0 + k_folds=5 for
+    cross-validation runs.
     """
     if use_local_ssd and all(Path(p).is_dir() for p in local_zarr_dirs().values()):
         ps.ZARR_DIRS = local_zarr_dirs()
@@ -267,8 +271,20 @@ def build_gncaf_split(
     if skip_test_patients:
         # create_splits already excludes test patients via TEST_CSV; just call it.
         pass
-    folds_pair, _test = ps.create_splits(entries, k_folds=k_folds, seed=seed)
-    val_entries, train_entries = folds_pair[0], folds_pair[1]
+    if k_folds == 1 and fold_idx == 0:
+        # Backwards compatible: ps.create_splits returns [val, train] when k_folds=1
+        folds_pair, _test = ps.create_splits(entries, k_folds=1, seed=seed)
+        val_entries, train_entries = folds_pair[0], folds_pair[1]
+    else:
+        # Request all 5 folds, pick fold_idx as val, concat the rest as train
+        all_folds, _test = ps.create_splits(entries, k_folds=5, seed=seed)
+        if fold_idx < 0 or fold_idx >= len(all_folds):
+            raise ValueError(f"fold_idx={fold_idx} out of range for {len(all_folds)} folds")
+        val_entries = all_folds[fold_idx]
+        train_entries = [s for i, f in enumerate(all_folds) if i != fold_idx for s in f]
+        print(f"  Using fold {fold_idx} as val ({len(val_entries)} slides), "
+              f"folds {[i for i in range(len(all_folds)) if i != fold_idx]} as train "
+              f"({len(train_entries)} slides)")
     return train_entries, val_entries
 
 

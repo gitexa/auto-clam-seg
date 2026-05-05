@@ -108,8 +108,11 @@ def main(cfg: DictConfig) -> None:
     bundle = build_tls_patch_dataset(cache_path=cfg.data.cache_path)
     print(f"Loaded patch cache: {bundle['features'].shape[0]:,} positive patches")
 
+    fold_idx = int(cfg.train.get("fold_idx", 0))
+    k_folds = int(cfg.train.get("k_folds", 1))
     train_short, val_short, n_val_p = slide_level_split_windows(
         bundle, val_frac=cfg.train.val_frac, seed=cfg.seed,
+        k_folds=k_folds, fold_idx=fold_idx,
     )
     print(f"Slide split: {len(train_short)} train, {len(val_short)} val "
           f"({n_val_p} val patients)")

@@ -190,7 +190,11 @@ def main(cfg: DictConfig) -> None:
     print(f"checkpoint: {cfg.checkpoint}")
     model = load_gncaf_transunet(cfg.checkpoint, device)
 
-    _train, val_entries = build_gncaf_split()
+    _train, val_entries = build_gncaf_split(
+        seed=cfg.seed,
+        k_folds=cfg.get("k_folds", 5),
+        fold_idx=cfg.get("fold_idx", 0),
+    )
     val_entries = [e for e in val_entries if e.get("mask_path")]
     if cfg.get("limit_slides"):
         val_entries = val_entries[: int(cfg.limit_slides)]

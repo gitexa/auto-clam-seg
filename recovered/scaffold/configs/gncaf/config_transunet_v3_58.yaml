@@ -3,6 +3,8 @@ defaults:
 stage: gncaf
 label: v3.58_gncaf_transunet_vit12_aug
 seed: 42
+k_folds: 5         # patient-stratified split; deterministic given seed
+fold_idx: 0        # 0..4 — which fold is validation (rest = train)
 out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
 
 # v3.58 = v3.57 + augmentation back. v3.53 showed aug destabilises GC
