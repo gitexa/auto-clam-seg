@@ -47,13 +47,20 @@ val: 158-166 slides, 118-124 mask-having.
 | Approach | Params | mDice_pix | TLS pix | GC pix | TLS sp | GC sp | n folds |
 |---|---|---|---|---|---|---|---|
 | seg_v2.0 (no graph) | ~4M | 0.552 ± 0.023 | 0.552 ± 0.023 | n/a¹ | 0.834 ± 0.045 | 0.342 ± 0.314 | 5 |
-| GNCAF v3.58 (12L+aug, paper-faithful) | 108M | 0.403 ± 0.081 | 0.372 ± 0.048 | 0.434 ± 0.121 | 0.569 ± 0.078 | 0.573 ± 0.083 | 5 |
-| GNCAF v3.56 (6L unfrozen) | 65M | 0.463 ± 0.079 | 0.481 ± 0.062 | 0.445 ± 0.099 | 0.691 ± 0.084 | 0.632 ± 0.098 | 5 |
+| GNCAF v3.58 (12-layer ViT-B/16 + aug)² | 108M | 0.403 ± 0.081 | 0.372 ± 0.048 | 0.434 ± 0.121 | 0.569 ± 0.078 | 0.573 ± 0.083 | 5 |
+| GNCAF v3.56 (6-layer ViT, unfrozen R50) | 65M | 0.463 ± 0.079 | 0.481 ± 0.062 | 0.445 ± 0.099 | 0.691 ± 0.084 | 0.632 ± 0.098 | 5 |
 | **Cascade (Stage 1 GATv2 + Stage 2 RegionDecoder)** | **14.5M** | **0.649 ± 0.110** | **0.591 ± 0.130** | **0.706 ± 0.092** | **0.821 ± 0.047** | **0.728 ± 0.143** | **5** |
 
 ¹ seg_v2.0 uses centroid heads for GC (not pixel segmentation), so GC
 pixel dice isn't natively comparable. Its GC counting Spearman is
 included for completeness.
+
+² "GNCAF" here = our re-implementation of the Su et al. 2025
+architecture (TransUNet + GCN context + MSA fusion). Trained on **our
+cohort** (TCGA BLCA/KIRC/LUSC, HookNet-derived 3-class GT) — not on
+the paper's TCGA-COAD with TLS-subtype labels. Numerical comparison
+to the paper's mIoU 54.21 is not meaningful; see caveat below the
+table.
 
 **Paired t-tests** (per-fold mDice_pix, n=5):
 - Cascade vs **GNCAF v3.58**: **t = 4.19, p = 0.014** ✅ significant
@@ -61,12 +68,26 @@ included for completeness.
 - Cascade vs seg_v2.0: t = 2.24, p = 0.089 (marginal)
 
 The cascade significantly outperforms **both** GNCAF variants at
-slide-level pixel-aggregate dice (p < 0.05 for both v3.58 and v3.56),
-even though GNCAF v3.58 closed the per-positives Dice gap to within
-0.004 IoU of the paper claim (Su et al. 2025). The structural advantage
-of the two-stage selection-then-decode cascade is the dominant
-deployment factor — and the cascade does so with **7-15× fewer
-parameters** than the GNCAF variants.
+slide-level pixel-aggregate dice (p < 0.05 for both v3.58 and v3.56)
+on this 5-fold cohort. The structural advantage of the two-stage
+selection-then-decode cascade is the dominant deployment factor — and
+the cascade does so with **7-15× fewer parameters** than the GNCAF
+variants.
+
+**Important caveat re. paper comparison.** Earlier sections of this
+document (v3.50–v3.58 paper-repro chase) compared GNCAF Dice numbers
+to the paper's mIoU 54.21 claim (Su et al. 2025). That comparison
+was **invalid** — the paper evaluates on **TCGA-COAD** (colon
+adenocarcinoma, 225 WSIs, pathologist-annotated TLS subtype classes
+{e-TLS, pel-TLS, sel-TLS}) and reports **mIoU averaged over those
+classes**. Our cohort is **TCGA-BLCA/KIRC/LUSC** with 3-class
+{bg, TLS, GC} HookNet-derived ground truth — different cancer types,
+different class taxonomy, different annotation source. The numerical
+coincidence (paper Dice ≈ 0.703 = our per-positives Dice 0.703) was
+read as semantic equivalence, but is not. The 5-fold CV benchmark
+above remains valid as an internal comparison across the four
+architectures **on our cohort**; it does not replicate or refute the
+paper's TCGA-COAD numbers.
 
 **Cascade variance note:** fold 0 (existing v3.37 ckpt, ~30 epoch tuned
 training) achieved 0.845 mDice_pix; folds 1-4 retrained with default
