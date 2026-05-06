@@ -13,6 +13,8 @@ closing_iters: 1
 limit_slides: null     # set to int for a quick smoke test
 slide_offset: 0        # for parallel sharding (process slides[offset::stride])
 slide_stride: 1
+k_folds: 5             # CV configuration; legacy default was 1
+fold_idx: 0            # 0..4 — which fold to evaluate against
 
 wandb:
   enabled: true

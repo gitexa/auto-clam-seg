@@ -23,15 +23,15 @@ train:
   s1_lr: 5.0e-5         # smaller LR on pre-trained Stage 1
   s2_lr: 1.0e-4         # smaller LR on pre-trained Stage 2 (vs 3e-4 fresh)
   weight_decay: 1.0e-4
-  epochs: 30
-  patience: 8
+  epochs: 15
+  patience: 5
   warmup_epochs: 2
   class_weights: [1.0, 5.0, 3.0]
   num_workers: 8
   grad_clip: 1.0
   dice_loss_weight: 0.5
   lambda_s2: 1.0        # weight of Stage 2 loss vs Stage 1 BCE
-  top_k: 16             # K patches per slide per step
+  top_k: 6              # K patches per slide per step (was 16 — RGB reads bottleneck)
   e2e_mode: soft        # soft|hard
 
 wandb:
