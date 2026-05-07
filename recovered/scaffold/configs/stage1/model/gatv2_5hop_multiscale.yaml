@@ -1,0 +1,11 @@
+# @package model
+# v3.60 multi-scale Stage 1: 5-hop GATv2 with scale embedding for
+# bipartite (fine 256-px / coarse 512-px) graph.
+# Same hyperparams as gatv2_5hop; the scale_embed is a separate
+# learnable bias (init zero) added to projected features.
+in_dim: 1536
+hidden_dim: 256
+n_hops: 5
+gnn_type: gatv2
+gat_heads: 4
+dropout: 0.1

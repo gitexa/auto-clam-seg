@@ -76,21 +76,42 @@ def load_stage2_region(ckpt_path: str, device: torch.device):
     return model.to(device).eval()
 
 
-def load_stage1(ckpt_path: str, device: torch.device) -> GraphTLSDetector:
+def load_stage1(ckpt_path: str, device: torch.device):
+    """Load a Stage 1 checkpoint. Auto-detects multi-scale checkpoints
+    (which contain a `scale_embed.weight` key) and instantiates the
+    appropriate model class.
+    """
     obj = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     cfg = obj.get("config", {}) or {}
-    # Support both old (flat) and new (nested model.X) configs.
     m = cfg.get("model", cfg)
-    model = GraphTLSDetector(
-        in_dim=m.get("in_dim", 1536),
-        hidden_dim=m.get("hidden_dim", 256),
-        n_hops=m.get("n_hops", 3),
-        gnn_type=m.get("gnn_type", "gatv2"),
-        dropout=m.get("dropout", 0.1),
-        gat_heads=m.get("gat_heads", 4),
+    state_dict = obj["model_state_dict"]
+    is_multi_scale = (
+        obj.get("model_class") == "MultiScaleGraphTLSDetector"
+        or "scale_embed.weight" in state_dict
     )
-    model.load_state_dict(obj["model_state_dict"], strict=True)
-    return model.to(device).eval()
+    if is_multi_scale:
+        from multiscale_stage1_model import MultiScaleGraphTLSDetector
+        model = MultiScaleGraphTLSDetector(
+            in_dim=m.get("in_dim", 1536),
+            hidden_dim=m.get("hidden_dim", 256),
+            n_hops=m.get("n_hops", 5),
+            gnn_type=m.get("gnn_type", "gatv2"),
+            dropout=m.get("dropout", 0.1),
+            gat_heads=m.get("gat_heads", 4),
+        )
+    else:
+        model = GraphTLSDetector(
+            in_dim=m.get("in_dim", 1536),
+            hidden_dim=m.get("hidden_dim", 256),
+            n_hops=m.get("n_hops", 3),
+            gnn_type=m.get("gnn_type", "gatv2"),
+            dropout=m.get("dropout", 0.1),
+            gat_heads=m.get("gat_heads", 4),
+        )
+    model.load_state_dict(state_dict, strict=True)
+    model = model.to(device).eval()
+    model._is_multi_scale = is_multi_scale
+    return model
 
 
 def load_stage2(ckpt_path: str, device: torch.device) -> UNIv2PixelDecoder:
@@ -302,10 +323,18 @@ def cascade_one_slide_neighborhood(stage1, stage2_nbhd, features, coords,
 def cascade_one_slide_region(stage1, stage2_region, features, coords, edge_index,
                              threshold, device, wsi_path, s2_batch=8,
                              min_component_size=2, closing_iters=1,
-                             return_cell_probs: bool = False):
+                             return_cell_probs: bool = False,
+                             multiscale_payload: dict | None = None):
     """v3.37 region-cascade: Stage 1 → connected components → 3×3 windows
     → RegionDecoder (RGB + UNI + graph). RGB tiles read from WSI .tif
     on demand (only for selected regions, not the full slide).
+
+    `features`, `coords`, and `edge_index` are FINE-only (256-px). When
+    using a multi-scale Stage 1, pass `multiscale_payload` =
+    {features_bi, edge_index_bi, scale_mask, n_fine} from
+    `multiscale_dataset.add_multi_scale` so Stage 1 can run over the
+    bipartite graph; outputs are sliced back to fine for selection
+    and Stage 2.
     """
     from scipy.ndimage import binary_closing as _bclose, label as _label
     import tifffile as _tifffile
@@ -323,10 +352,21 @@ def cascade_one_slide_region(stage1, stage2_region, features, coords, edge_index
     coord_to_idx = {(int(grid_y_np[i]), int(grid_x_np[i])): i for i in range(n)}
 
     # Stage 1 selection + graph context (single forward; head + before-head).
-    feats_dev = features.to(device); ei_dev = edge_index.to(device)
-    s1_logits = stage1(feats_dev, ei_dev)
+    if multiscale_payload is not None:
+        feats_dev = multiscale_payload["features"].to(device)
+        ei_dev = multiscale_payload["edge_index"].to(device)
+        scale_mask_dev = multiscale_payload["scale_mask"].to(device)
+        n_fine = int(multiscale_payload["n_fine"])
+        assert n_fine == n, f"n_fine mismatch: {n_fine} vs {n}"
+        s1_logits_all = stage1(feats_dev, ei_dev, scale_mask_dev)
+        graph_ctx_all = stage1.extract_context(feats_dev, ei_dev, scale_mask_dev)
+        s1_logits = s1_logits_all[:n_fine]
+        graph_ctx_t = graph_ctx_all[:n_fine]
+    else:
+        feats_dev = features.to(device); ei_dev = edge_index.to(device)
+        s1_logits = stage1(feats_dev, ei_dev)
+        graph_ctx_t = extract_stage1_context(stage1, feats_dev, ei_dev)   # (N, gat_dim)
     s1_probs = torch.sigmoid(s1_logits).cpu().numpy()
-    graph_ctx_t = extract_stage1_context(stage1, feats_dev, ei_dev)   # (N, gat_dim)
 
     selected = np.where(s1_probs > threshold)[0]
     selected_grid = np.zeros((H, W), dtype=np.uint8)
@@ -618,6 +658,41 @@ def main(cfg: DictConfig) -> None:
                 continue
 
             t0 = time.time()
+            # Build multi-scale payload if Stage 1 is multi-scale.
+            multiscale_payload = None
+            if getattr(stage1, "_is_multi_scale", False):
+                from multiscale_dataset import _load_coarse_zarr, _build_containment_edges
+                cz = _load_coarse_zarr(entry["cancer_type"], entry["slide_id"])
+                if cz is None:
+                    print(f"  skip {short_id}: no coarse 512-px zarr")
+                    continue
+                coarse_features_np, coarse_coords_np, coarse_ei_np = cz
+                n_fine = features.shape[0]
+                n_coarse = coarse_features_np.shape[0]
+                feats_bi = torch.cat([
+                    features,
+                    torch.from_numpy(coarse_features_np),
+                ], dim=0)
+                # Edges: fine-fine + coarse-coarse (offset) + bidirectional containment.
+                c_idx, f_idx = _build_containment_edges(coords.numpy(), coarse_coords_np)
+                edges = [edge_index.long()]
+                if coarse_ei_np.size:
+                    edges.append(torch.from_numpy(coarse_ei_np).long() + n_fine)
+                if c_idx.size:
+                    c_global = torch.from_numpy(c_idx).long() + n_fine
+                    f_global = torch.from_numpy(f_idx).long()
+                    edges.append(torch.stack([c_global, f_global]))
+                    edges.append(torch.stack([f_global, c_global]))
+                ei_bi = torch.cat(edges, dim=1)
+                scale_mask = torch.cat([
+                    torch.zeros(n_fine, dtype=torch.long),
+                    torch.ones(n_coarse, dtype=torch.long),
+                ])
+                multiscale_payload = {
+                    "features": feats_bi, "edge_index": ei_bi,
+                    "scale_mask": scale_mask, "n_fine": n_fine,
+                }
+
             if region_mode:
                 from gncaf_dataset import slide_wsi_path as _wsi_path
                 wsi_p = _wsi_path(entry)
@@ -630,6 +705,7 @@ def main(cfg: DictConfig) -> None:
                     s2_batch=int(cfg.get("region_s2_batch", 8)),
                     min_component_size=int(cfg.get("min_component_size", 2)),
                     closing_iters=int(cfg.get("closing_iters", 1)),
+                    multiscale_payload=multiscale_payload,
                 )
             elif neighborhood_mode:
                 grid_class, n_selected, pred_tiles = cascade_one_slide_neighborhood(
