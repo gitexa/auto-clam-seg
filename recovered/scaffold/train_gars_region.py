@@ -74,9 +74,68 @@ def load_stage1_frozen(ckpt_path: str, device: torch.device):
     return model
 
 
+def _dual_sigmoid_loss(logits_tuple, target, ignore_index, eps=1e-6):
+    """v3.38 dual-sigmoid Region loss: BCE + Dice on each binary head.
+
+    Targets:
+      target_tls = (target >= 1) ∧ valid   (GC ⊂ TLS biology)
+      target_gc  = (target == 2) ∧ valid
+    All weights = 1.0 per v3.65 lesson.
+    """
+    tls_logits, gc_logits = logits_tuple
+    valid = (target != ignore_index)
+    t_tls = ((target >= 1) & valid).float().unsqueeze(1)
+    t_gc = ((target == 2) & valid).float().unsqueeze(1)
+    v = valid.float().unsqueeze(1)
+
+    def _bce_masked(lg, t):
+        # F.binary_cross_entropy_with_logits doesn't support ignore;
+        # mask out invalid pixels manually.
+        per = F.binary_cross_entropy_with_logits(lg, t, reduction="none")
+        return (per * v).sum() / (v.sum() + eps)
+
+    def _dice_masked(lg, t):
+        p = torch.sigmoid(lg) * v
+        t = t * v
+        inter = (p * t).sum(dim=(1, 2, 3))
+        denom = p.sum(dim=(1, 2, 3)) + t.sum(dim=(1, 2, 3))
+        return (1.0 - (2 * inter + eps) / (denom + eps)).mean()
+
+    loss = (_bce_masked(tls_logits, t_tls) + _bce_masked(gc_logits, t_gc)
+            + _dice_masked(tls_logits, t_tls) + _dice_masked(gc_logits, t_gc))
+    return loss, {"loss": float(loss.detach())}
+
+
+def _per_class_dice_dual_sigmoid(logits_tuple, target, ignore_index, eps=1e-6):
+    """Per-class Dice for the dual-sigmoid head, returns [bg, TLS, GC] list.
+
+    bg  = neither head fires
+    TLS = sigmoid(tls) > 0.5 (over target >= 1)
+    GC  = sigmoid(gc)  > 0.5 (over target == 2)
+    """
+    tls_logits, gc_logits = logits_tuple
+    valid = (target != ignore_index)
+    p_tls = ((torch.sigmoid(tls_logits).squeeze(1) > 0.5) & valid)
+    p_gc = ((torch.sigmoid(gc_logits).squeeze(1) > 0.5) & valid)
+    p_bg = (~p_tls) & (~p_gc) & valid
+    t_tls = ((target >= 1) & valid)
+    t_gc = ((target == 2) & valid)
+    t_bg = ((target == 0) & valid)
+
+    out = []
+    for p, t in [(p_bg, t_bg), (p_tls, t_tls), (p_gc, t_gc)]:
+        p_f = p.float(); t_f = t.float()
+        inter = (p_f * t_f).sum(dim=(1, 2))
+        denom = p_f.sum(dim=(1, 2)) + t_f.sum(dim=(1, 2))
+        out.append(((2 * inter + eps) / (denom + eps)).mean().item())
+    return out
+
+
 def run_split(model, loader, device, optimizer, criterion_args, train: bool):
     model.train() if train else model.eval()
     total_loss = 0.0; sums = [0.0, 0.0, 0.0]; n = 0
+    is_dual = getattr(model, "head_mode", "argmax") == "dual_sigmoid"
+    ignore_index = criterion_args.get("ignore_index", -100)
     ctx = torch.enable_grad() if train else torch.no_grad()
     with ctx:
         for batch in loader:
@@ -86,13 +145,19 @@ def run_split(model, loader, device, optimizer, criterion_args, train: bool):
             mask = batch["mask"].to(device, non_blocking=True)
             valid = batch["valid_mask"].to(device, non_blocking=True)
             logits = model(rgb, uni, gat, valid)
-            loss, _ = region_loss(logits, mask, **criterion_args)
+            if is_dual:
+                loss, _ = _dual_sigmoid_loss(logits, mask, ignore_index=ignore_index)
+                d = _per_class_dice_dual_sigmoid(
+                    (logits[0].detach(), logits[1].detach()), mask, ignore_index=ignore_index,
+                )
+            else:
+                loss, _ = region_loss(logits, mask, **criterion_args)
+                d = per_class_dice_region(logits.detach(), mask)
             if train:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer.step()
             total_loss += float(loss.detach()) * rgb.shape[0]
-            d = per_class_dice_region(logits.detach(), mask)
             for i in range(3):
                 sums[i] += d[i] * rgb.shape[0]
             n += rgb.shape[0]
@@ -172,6 +237,7 @@ def main(cfg: DictConfig) -> None:
         prefetch_factor=pf, persistent_workers=pw,
     )
 
+    head_mode = str(cfg.model.get("head_mode", "argmax"))
     model = RegionDecoder(
         uni_dim=cfg.model.uni_dim,
         gat_dim=cfg.model.gat_dim,
@@ -180,6 +246,7 @@ def main(cfg: DictConfig) -> None:
         grid_n=cfg.model.grid_n,
         rgb_pretrained=cfg.model.rgb_pretrained,
         freeze_rgb_encoder=cfg.model.freeze_rgb_encoder,
+        head_mode=head_mode,
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -191,7 +258,11 @@ def main(cfg: DictConfig) -> None:
     )
     scheduler = make_warmup_cosine(optimizer, cfg.train.warmup_epochs, cfg.train.epochs)
     cw = torch.tensor(list(cfg.train.class_weights), device=device, dtype=torch.float32)
-    criterion_args = dict(class_weights=cw, gc_dice_weight=cfg.train.gc_dice_weight)
+    # For dual-sigmoid we ignore class_weights/gc_dice_weight (v3.65 lesson:
+    # equal-weight BCE+Dice trains fine). ignore_index is shared.
+    from train_gars_neighborhood import INVALID_MASK_VALUE
+    criterion_args = dict(class_weights=cw, gc_dice_weight=cfg.train.gc_dice_weight,
+                          ignore_index=INVALID_MASK_VALUE)
 
     run = None
     if cfg.wandb.enabled and cfg.wandb.mode != "disabled":

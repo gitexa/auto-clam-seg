@@ -58,21 +58,27 @@ def load_stage2_neighborhood(ckpt_path: str, device: torch.device):
 
 
 def load_stage2_region(ckpt_path: str, device: torch.device):
-    """Load v3.37 RegionDecoder (RGB+UNI+graph) with strict=True."""
+    """Load v3.37 (argmax) or v3.38 (dual-sigmoid) RegionDecoder with strict=True.
+    Auto-detects dual-sigmoid via `head_tls.weight` key in the state_dict.
+    """
     from region_decoder_model import RegionDecoder
     obj = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     cfg = obj.get("config", {}) or {}
     m = cfg.get("model", cfg)
+    sd = obj["model_state_dict"]
+    head_mode = "dual_sigmoid" if any(k.startswith("head_tls.") for k in sd) else "argmax"
     model = RegionDecoder(
         uni_dim=m.get("uni_dim", 1536),
         gat_dim=m.get("gat_dim", 256),
         hidden_channels=m.get("hidden_channels", 64),
         n_classes=m.get("n_classes", 3),
         grid_n=m.get("grid_n", 3),
-        rgb_pretrained=False,           # weights overridden by strict-load anyway
+        rgb_pretrained=False,
         freeze_rgb_encoder=False,
+        head_mode=head_mode,
     )
-    model.load_state_dict(obj["model_state_dict"], strict=True)
+    model.load_state_dict(sd, strict=True)
+    print(f"  Stage 2 RegionDecoder head_mode={head_mode}")
     return model.to(device).eval()
 
 
@@ -440,7 +446,24 @@ def cascade_one_slide_region(stage1, stage2_region, features, coords, edge_index
         b_rgb = rgb_t[s : s + s2_batch]; b_uni = uni_t[s : s + s2_batch]
         b_gat = gat_t[s : s + s2_batch]; b_val = val_t[s : s + s2_batch]
         logits = stage2_region(b_rgb, b_uni, b_gat, b_val)
-        probs = torch.softmax(logits, dim=1).cpu().numpy()           # (B, 3, 768, 768)
+        if isinstance(logits, tuple):
+            # v3.38 dual-sigmoid head: independent TLS/GC sigmoid heads.
+            # Build a pseudo-3-class probability tensor that matches the
+            # downstream argmax expectations:
+            #   class 0 (bg) = (1 - p_tls) * (1 - p_gc)
+            #   class 1 (TLS only) = p_tls * (1 - p_gc)
+            #   class 2 (GC) = p_gc
+            # Argmax of these three correctly assigns: any GC fire → 2;
+            # else any TLS fire → 1; else bg → 0. Matches the biology
+            # (GC ⊂ TLS) without forcing them to compete in softmax.
+            tls_logits, gc_logits = logits
+            p_tls = torch.sigmoid(tls_logits)
+            p_gc = torch.sigmoid(gc_logits)
+            p_bg = (1.0 - p_tls) * (1.0 - p_gc)
+            p_t_only = p_tls * (1.0 - p_gc)
+            probs = torch.cat([p_bg, p_t_only, p_gc], dim=1).cpu().numpy()
+        else:
+            probs = torch.softmax(logits, dim=1).cpu().numpy()           # (B, 3, 768, 768)
         for b, wi in enumerate(range(s, s + b_rgb.shape[0])):
             ty, tx = windows[wi]
             for k in range(G * G):

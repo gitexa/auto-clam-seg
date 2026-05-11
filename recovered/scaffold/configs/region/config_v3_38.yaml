@@ -1,0 +1,43 @@
+defaults:
+  - model: region_h64
+  - train: region
+  - _self_
+
+stage: region
+label: v3.38_dual_sigmoid
+seed: 42
+fold_idx: 0
+k_folds: 5
+out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
+
+stage1: /home/ubuntu/ahaas-persistent-std-tcga/experiments/gars_stage1_v3.8_gatv2_5hop_20260501_043445/best_checkpoint.pt
+
+# v3.38 — same RegionDecoder backbone as the v3.37 champion, with
+# the seg_head swapped for dual binary sigmoid heads (head_tls + head_gc).
+# Loss recipe per v3.65 lesson (simple BCE + Dice on each head, all
+# weights = 1.0). class_weights / gc_dice_weight in train.* are inherited
+# from the v3.37 config but ignored under head_mode=dual_sigmoid.
+model:
+  head_mode: dual_sigmoid
+
+data:
+  cache_path: /home/ubuntu/local_data/tls_patch_dataset_min4096.pt
+  max_windows_per_slide: 64
+  tile_clusters: true
+  stride: 2
+
+wandb:
+  enabled: true
+  project: tls-pixel-seg
+  entity: null
+  mode: ${oc.env:WANDB_MODE,online}
+  tags: [v3, region, cascade-v2, dual_sigmoid, v3.38]
+
+hydra:
+  run:
+    dir: ${out_root}/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+  sweep:
+    dir: ${out_root}/multirun/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+    subdir: ${hydra.job.num}_${hydra.job.override_dirname}
+  job:
+    chdir: false

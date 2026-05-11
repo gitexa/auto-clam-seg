@@ -852,6 +852,9 @@ def main():
     perslide = {}
     # Cascade priority: fullcohort (with negatives) > 5fold per-slide (positives only) > legacy.
     cascade_label_folds = [
+        # 2026-05-11: v3.38 dual-sigmoid Stage 2 — NEGATIVE result (tied with v3.37, slightly worse mDice).
+        # Kept here as a column for transparency; not the champion.
+        # ("cascade_v3.38_fullcohort", 0),  # commented: documented in audit doc, not in headline plot.
         # 2026-05-11: union-metric re-eval (carries tls_dice_union); preferred.
         ("cascade_union_fullcohort", 0),
         # Phase 1: cascade fullcohort fold 0 (with GT-negatives).

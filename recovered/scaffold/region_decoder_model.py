@@ -105,8 +105,10 @@ class RegionDecoder(nn.Module):
         grid_n: int = 3,
         rgb_pretrained: bool = True,
         freeze_rgb_encoder: bool = False,
+        head_mode: str = "argmax",
     ):
         super().__init__()
+        self.head_mode = head_mode
         self.grid_n = grid_n
         self.n_cells = grid_n * grid_n
         self.fuse_dim = 512
@@ -135,7 +137,16 @@ class RegionDecoder(nn.Module):
         self.dec2 = UpDoubleConv(128, 64)
         self.dec3 = UpDoubleConv(64, 32)
         self.dec4 = UpDoubleConv(32, hidden_channels)
-        self.seg_head = nn.Conv2d(hidden_channels, n_classes, kernel_size=1)
+        if head_mode == "dual_sigmoid":
+            # v3.38: independent binary heads for TLS (target>=1) and GC (target==2).
+            # Biology: GC ⊂ TLS; argmax forces them to compete for the same pixel.
+            self.head_tls = nn.Conv2d(hidden_channels, 1, kernel_size=1)
+            self.head_gc = nn.Conv2d(hidden_channels, 1, kernel_size=1)
+            self.seg_head = None
+        else:
+            self.seg_head = nn.Conv2d(hidden_channels, n_classes, kernel_size=1)
+            self.head_tls = None
+            self.head_gc = None
 
     def forward(
         self,
@@ -191,6 +202,10 @@ class RegionDecoder(nn.Module):
         z = self.dec2(z)            # 64k
         z = self.dec3(z)            # 128k
         z = self.dec4(z)            # 256k
+        if self.head_mode == "dual_sigmoid":
+            tls_logits = self.head_tls(z)
+            gc_logits = self.head_gc(z)
+            return (tls_logits, gc_logits)
         return self.seg_head(z)     # (B, n_classes, 256·k, 256·k)
 
 
