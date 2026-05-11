@@ -142,6 +142,11 @@ def collect_perslide(label_prefix: str, folds: list[int]) -> pd.DataFrame:
                 r["approach"] = label_prefix
                 # Default for legacy rows that pre-date the gt_negative field.
                 r.setdefault("gt_negative", False)
+                # Prefer union-semantic TLS Dice (GC ⊂ TLS) when present —
+                # apples-to-apples with dual-sigmoid models. Falls back to
+                # strict-semantic for legacy rows.
+                if "tls_dice_grid_union" in r:
+                    r["tls_dice_grid"] = r["tls_dice_grid_union"]
                 rows.append(r)
     return pd.DataFrame(rows)
 
@@ -166,7 +171,12 @@ def collect_perslide_cascade(label_prefixes: list[tuple[str, int]],
             obj = json.loads(ps_path.read_text())
             for r in obj.get(threshold, []):
                 row = dict(r)
-                row["tls_dice_grid"] = row.get("tls_dice", np.nan)
+                # Prefer union-semantic TLS Dice when present (apples-to-apples
+                # with dual-sigmoid models). Falls back to strict.
+                if "tls_dice_union" in row:
+                    row["tls_dice_grid"] = row["tls_dice_union"]
+                else:
+                    row["tls_dice_grid"] = row.get("tls_dice", np.nan)
                 row["gc_dice_grid"] = row.get("gc_dice", np.nan)
                 row["fold"] = fold
                 row["approach"] = "Cascade v3.37"
@@ -842,6 +852,8 @@ def main():
     perslide = {}
     # Cascade priority: fullcohort (with negatives) > 5fold per-slide (positives only) > legacy.
     cascade_label_folds = [
+        # 2026-05-11: union-metric re-eval (carries tls_dice_union); preferred.
+        ("cascade_union_fullcohort", 0),
         # Phase 1: cascade fullcohort fold 0 (with GT-negatives).
         ("v3.37_fullcohort", 0),
         # Phase 2 (when ready): cascade folds 1-4 with negatives.
@@ -862,7 +874,13 @@ def main():
         nfolds = casc["fold"].nunique()
         nneg = int(casc["gt_negative"].sum())
         print(f"  v3.37 cascade per-slide rows: {len(casc)} ({nfolds} fold(s), {nneg} GT-neg)")
-    perslide["GNCAF v3.58"] = collect_perslide("v3.58", folds=list(range(5)))
+    # Prefer union-metric re-evals when present (carries tls_dice_grid_union).
+    v58_union = collect_perslide("v3.58_union", folds=[0])
+    if len(v58_union):
+        perslide["GNCAF v3.58"] = v58_union
+        print(f"  v3.58 (union) per-slide rows: {len(v58_union)} (fold 0 only)")
+    else:
+        perslide["GNCAF v3.58"] = collect_perslide("v3.58", folds=list(range(5)))
     perslide["GNCAF v3.56"] = collect_perslide("v3.56", folds=list(range(5)))
     v59 = collect_perslide("v3.59", folds=[0])
     if len(v59):
@@ -876,10 +894,15 @@ def main():
     if len(v61):
         perslide["GNCAF v3.61"] = v61
         print(f"  v3.61 per-slide rows: {len(v61)} (fold 0 only)")
-    v62 = collect_perslide("v3.62", folds=[0])
-    if len(v62):
-        perslide["GNCAF v3.62"] = v62
-        print(f"  v3.62 per-slide rows: {len(v62)} (fold 0 only)")
+    v62_union = collect_perslide("v3.62_union", folds=[0])
+    if len(v62_union):
+        perslide["GNCAF v3.62"] = v62_union
+        print(f"  v3.62 (union) per-slide rows: {len(v62_union)} (fold 0 only)")
+    else:
+        v62 = collect_perslide("v3.62", folds=[0])
+        if len(v62):
+            perslide["GNCAF v3.62"] = v62
+            print(f"  v3.62 per-slide rows: {len(v62)} (fold 0 only)")
     v63 = collect_perslide("v3.63", folds=[0])
     if len(v63):
         perslide["GNCAF v3.63"] = v63

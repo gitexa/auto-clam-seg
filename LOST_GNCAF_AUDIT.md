@@ -580,6 +580,68 @@ The publication story: **a 4 M-param Stage 1 gate is the right inductive
 bias for any pixel-decoder on this task**. Cascade builds it in by design;
 GNCAF needs it retrofitted at inference time.
 
+### Apples-to-apples union TLS Dice (2026-05-11) — fair across argmax + dual-sigmoid
+
+User question: "Is TLS dice now evaluated on the full TLS+GC annotations
+(GC is TLS)?" Diagnosis: previously **only for dual-sigmoid models**.
+Argmax models (cascade, v3.58, v3.62) computed TLS Dice with `pred == 1`
+and `gt == 1`, which excludes GC pixels from both prediction and GT.
+**Pixels the model correctly predicts as GC scored as missed TLS.**
+
+Fix: added `tls_dice_grid_union` (cascade: `tls_dice_union`) field to
+the argmax eval branches in `eval_gars_cascade.py` and
+`eval_gars_gncaf_transunet.py`. Re-ran cascade, v3.58, v3.62 fold-0
+fullcohort with the new metric stored. Dual-sigmoid models
+(v3.63/v3.65/seg_v2.0 dual) already used the union semantic.
+
+`build_arch_comparison.py:collect_perslide` now prefers
+`tls_dice_grid_union` over the legacy `tls_dice_grid` when present.
+
+### Union-metric ranking (fold-0 full cohort, n=165)
+
+| Rank | Architecture | TLS Dice (union) | GC Dice | mDice (union) | TLS-FP |
+|---|---|---|---|---|---|
+| 🏆 | **Cascade v3.37** | **0.606** | **0.831** | **0.719** | 41 % |
+| 🥈 | seg_v2.0 (dual) | 0.591 | 0.742 | 0.667 | 62 % |
+| 🥉 | GNCAF v3.62 (paper-strict argmax) | **0.331** | 0.685 | **0.508** | 85 % |
+| 4 | GNCAF v3.65 + Stage 1 gate | 0.272 | 0.672 | 0.472 | 41.5 % |
+| 5 | GNCAF v3.65 (dual-σ, simple loss) | 0.275 | 0.664 | 0.469 | 92.7 % |
+| 6 | GNCAF v3.63 (dual-σ, heavy weights) | 0.200 | 0.669 | 0.435 | 97.6 % |
+| 7 | GNCAF v3.58 (line-B prod) | 0.276 | 0.587 | 0.432 | 95 % |
+
+### What changed vs the strict-semantic ranking
+
+| Metric | Strict (prev) | Union (new) | Δ |
+|---|---|---|---|
+| Cascade TLS Dice | 0.593 | **0.606** | +0.013 |
+| Cascade mDice | 0.712 | **0.719** | +0.007 |
+| v3.58 TLS Dice | 0.268 | 0.276 | +0.008 |
+| v3.62 TLS Dice | 0.322 | 0.331 | +0.009 |
+| v3.62 mDice | 0.504 | **0.508** | +0.004 |
+| dual-sigmoid models | unchanged | unchanged | 0 (already union-semantic) |
+
+Cascade's TLS Dice rises modestly (+0.013) since it's the model that
+predicts GC most accurately (GC Dice 0.831) — those pixels now count
+toward TLS too. v3.58/v3.62 see smaller bumps because their GC
+predictions are weaker. Dual-sigmoid models are unchanged: their
+metric was already the union.
+
+### Apples-to-apples conclusion
+
+* **Cascade still wins clearly** (mDice 0.719 — best on every metric).
+* **seg_v2.0 (dual)** firmly second (0.667).
+* **GNCAF v3.62 (paper-strict argmax)** now reveals itself as the
+  strongest GNCAF variant at mDice 0.508 — was being undercounted by
+  the strict TLS metric. The earlier audit's claim that "v3.65 simple
+  loss is the new GNCAF SOTA" was metric-artefact: v3.65 dual-sigmoid
+  benefited from the more permissive union semantic, while v3.62
+  argmax was penalised. Once both use union, v3.62 wins.
+* The dense-pixel-decoder ceiling is real: even v3.62 + gate stays
+  below cascade by ~0.21 mDice. The gap is pixel-level segmentation
+  quality on positive slides, which is RegionDecoder's strength.
+
+---
+
 ### Universal applicability — the gate fixes any dense pixel decoder
 
 Same Stage 1 gate, applied to seg_v2.0 variants and GNCAF v3.63:

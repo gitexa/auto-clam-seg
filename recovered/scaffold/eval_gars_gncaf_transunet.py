@@ -407,14 +407,26 @@ def main(cfg: DictConfig) -> None:
             inter_g = int((pgg & tgg).sum()); denom_g = int(pgg.sum() + tgg.sum())
             tls_d_grid = (2 * inter_t / denom_t) if denom_t else (1.0 if ptg.sum() == 0 else 0.0)
             gc_d_grid = (2 * inter_g / denom_g) if denom_g else (1.0 if pgg.sum() == 0 else 0.0)
+            # For dual-sigmoid the legacy and union metrics are identical
+            # (TLS GT already uses gt>=1).
+            tls_d_grid_union = tls_d_grid
         else:
             p, tg = r["pred_grid"], r["target_grid"]
             tls_d_grid = dice_score(p, tg, 1)
             gc_d_grid = dice_score(p, tg, 2)
+            # Union-semantic TLS Dice: ANY foreground (pred>=1) ∧ ANY foreground (gt>=1).
+            # GC ⊂ TLS biology — a pixel correctly predicted as GC should not
+            # count as missed TLS.
+            eps = 1e-6
+            p_fg = (p >= 1); t_fg = (tg >= 1)
+            inter_u = int((p_fg & t_fg).sum()); denom_u = int(p_fg.sum() + t_fg.sum())
+            tls_d_grid_union = (2 * inter_u + eps) / (denom_u + eps)
 
         per_slide.append({
             "slide_id": sid, "cancer_type": r["cancer_type"],
-            "tls_dice_grid": tls_d_grid, "gc_dice_grid": gc_d_grid,
+            "tls_dice_grid": tls_d_grid,
+            "tls_dice_grid_union": tls_d_grid_union,
+            "gc_dice_grid": gc_d_grid,
             "n_tls_pred": n_tls_pred, "n_gc_pred": n_gc_pred,
             "gt_n_tls": gt_n_tls, "gt_n_gc": gt_n_gc,
             "gt_negative": bool(r.get("gt_negative", False)),

@@ -747,6 +747,15 @@ def main(cfg: DictConfig) -> None:
                 target_grid = patch_grid_from_mask_cache(cache, coords, cfg.upsample_factor)
             tls_d = dice_score(grid_class, target_grid, 1)
             gc_d = dice_score(grid_class, target_grid, 2)
+            # Union-semantic TLS Dice: ANY foreground prediction vs ANY
+            # foreground GT (GC ⊂ TLS biology — correctly predicted GC
+            # should not score as missed TLS). Apples-to-apples with
+            # dual-sigmoid models that compute TLS Dice the same way.
+            _eps = 1e-6
+            _p_fg = (grid_class >= 1); _t_fg = (target_grid >= 1)
+            _inter_u = int((_p_fg & _t_fg).sum())
+            _denom_u = int(_p_fg.sum() + _t_fg.sum())
+            tls_d_union = (2 * _inter_u + _eps) / (_denom_u + _eps)
 
             # Per-pixel aggregate dice over selected patches' native masks.
             # GT-negatives have no per-patch GT lookup → every selected
@@ -777,7 +786,8 @@ def main(cfg: DictConfig) -> None:
                 ))
             per_slide.append({
                 "slide_id": short_id, "cancer_type": entry["cancer_type"],
-                "tls_dice": tls_d, "gc_dice": gc_d, "mDice": (tls_d + gc_d) / 2.0,
+                "tls_dice": tls_d, "tls_dice_union": tls_d_union,
+                "gc_dice": gc_d, "mDice": (tls_d + gc_d) / 2.0,
                 "n_tls_pred": n_tls_pred,
                 "n_tls_true": count_components(target_grid, 1),
                 "n_gc_pred": n_gc_pred,
