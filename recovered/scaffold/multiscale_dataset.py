@@ -112,6 +112,44 @@ def _build_containment_edges(
     )
 
 
+def build_multiscale_inputs_np(
+    fine_features_np: np.ndarray,    # (N_fine, 1536)
+    fine_coords_np: np.ndarray,       # (N_fine, 2)
+    fine_edges_np: np.ndarray,        # (2, E_fine)
+    cancer_type: str,
+    slide_id: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int] | None:
+    """Build the bipartite multi-scale inputs (numpy → numpy) for a slide.
+
+    Returns (features_combined, edges_combined, scale_mask, n_fine).
+    Each output is numpy. Returns None if the coarse zarr is missing.
+    """
+    coarse = _load_coarse_zarr(cancer_type, slide_id)
+    if coarse is None:
+        return None
+    coarse_features_np, coarse_coords_np, coarse_ei_np = coarse
+    n_fine = int(fine_features_np.shape[0])
+    n_coarse = int(coarse_features_np.shape[0])
+
+    c_idx, f_idx = _build_containment_edges(fine_coords_np, coarse_coords_np)
+
+    feats_combined = np.concatenate([fine_features_np, coarse_features_np], axis=0)
+    edges_list = [fine_edges_np.astype(np.int64)]
+    if coarse_ei_np.size:
+        edges_list.append(coarse_ei_np.astype(np.int64) + n_fine)
+    if c_idx.size:
+        c_global = c_idx + n_fine
+        f_global = f_idx
+        edges_list.append(np.stack([c_global, f_global]))
+        edges_list.append(np.stack([f_global, c_global]))
+    edges_combined = np.concatenate(edges_list, axis=1)
+    scale_mask = np.concatenate([
+        np.zeros(n_fine, dtype=np.int64),
+        np.ones(n_coarse, dtype=np.int64),
+    ])
+    return feats_combined, edges_combined, scale_mask, n_fine
+
+
 def _load_coarse_zarr(cancer_type: str, slide_id: str
                       ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
     """Load (features, coords, edge_index) for a slide's 512-px zarr.

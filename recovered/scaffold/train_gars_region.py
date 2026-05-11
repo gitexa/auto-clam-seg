@@ -37,22 +37,40 @@ from region_dataset import RegionDataset
 from tls_neighborhood_dataset import slide_level_split_windows
 
 
-def load_stage1_frozen(ckpt_path: str, device: torch.device) -> GraphTLSDetector:
+def load_stage1_frozen(ckpt_path: str, device: torch.device):
+    """Load Stage 1, single-scale or multi-scale (auto-detected)."""
     obj = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     cfg = obj.get("config", {}) or {}
     m = cfg.get("model", cfg)
-    model = GraphTLSDetector(
-        in_dim=m.get("in_dim", 1536),
-        hidden_dim=m.get("hidden_dim", 256),
-        n_hops=m.get("n_hops", 5),
-        gnn_type=m.get("gnn_type", "gatv2"),
-        dropout=m.get("dropout", 0.1),
-        gat_heads=m.get("gat_heads", 4),
+    state_dict = obj["model_state_dict"]
+    is_multi_scale = (
+        obj.get("model_class") == "MultiScaleGraphTLSDetector"
+        or "scale_embed.weight" in state_dict
     )
-    model.load_state_dict(obj["model_state_dict"], strict=True)
+    if is_multi_scale:
+        from multiscale_stage1_model import MultiScaleGraphTLSDetector
+        model = MultiScaleGraphTLSDetector(
+            in_dim=m.get("in_dim", 1536),
+            hidden_dim=m.get("hidden_dim", 256),
+            n_hops=m.get("n_hops", 5),
+            gnn_type=m.get("gnn_type", "gatv2"),
+            dropout=m.get("dropout", 0.1),
+            gat_heads=m.get("gat_heads", 4),
+        )
+    else:
+        model = GraphTLSDetector(
+            in_dim=m.get("in_dim", 1536),
+            hidden_dim=m.get("hidden_dim", 256),
+            n_hops=m.get("n_hops", 5),
+            gnn_type=m.get("gnn_type", "gatv2"),
+            dropout=m.get("dropout", 0.1),
+            gat_heads=m.get("gat_heads", 4),
+        )
+    model.load_state_dict(state_dict, strict=True)
     model = model.to(device).eval()
     for p in model.parameters():
         p.requires_grad = False
+    model._is_multi_scale = is_multi_scale
     return model
 
 

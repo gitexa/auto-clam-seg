@@ -134,6 +134,8 @@ class RegionDataset(Dataset):
                 "coord_to_idx": coord_to_idx,
                 "cell_to_cache_row": cell_to_cache_row,
                 "H": H, "W": W,
+                "cancer_type": entry["cancer_type"],
+                "slide_id_full": entry["slide_id"],
             }
             pos_cells = list(cell_to_cache_row.keys())
             tops = _enumerate_windows(
@@ -149,18 +151,49 @@ class RegionDataset(Dataset):
         self._ctx_cache: OrderedDict[str, np.ndarray] = OrderedDict()
 
         if precompute_graph_ctx and self._slide_meta:
-            print(f"  Pre-computing Stage 1 graph context for {len(self._slide_meta)} slides...")
+            is_multi = bool(getattr(self._stage1, "_is_multi_scale", False))
+            print(f"  Pre-computing Stage 1 graph context for {len(self._slide_meta)} slides "
+                  f"(multi_scale={is_multi})...")
             t0 = time.time()
+            n_skipped_ms = 0
             with torch.no_grad():
                 for short, meta in self._slide_meta.items():
                     z = self._zarr(short)
-                    feats = torch.from_numpy(np.asarray(z["features"][:])).float()
-                    edges = torch.from_numpy(meta["edge_index"]).long()
-                    ctx = extract_stage1_context(
-                        self._stage1, feats.to(self._stage1_device),
-                        edges.to(self._stage1_device),
-                    ).cpu().numpy()
+                    feats_np = np.asarray(z["features"][:]).astype(np.float32)
+                    if is_multi:
+                        from multiscale_dataset import build_multiscale_inputs_np
+                        ms = build_multiscale_inputs_np(
+                            feats_np, meta["coords"], meta["edge_index"],
+                            meta["cancer_type"], meta["slide_id_full"],
+                        )
+                        if ms is None:
+                            # Coarse zarr missing — skip; window selection
+                            # would still proceed but ctx would be wrong.
+                            # Drop this slide so the trainer doesn't see it.
+                            n_skipped_ms += 1
+                            continue
+                        feats_combined, edges_combined, scale_mask, n_fine = ms
+                        feats_t = torch.from_numpy(feats_combined).to(self._stage1_device)
+                        edges_t = torch.from_numpy(edges_combined).long().to(self._stage1_device)
+                        smask_t = torch.from_numpy(scale_mask).to(self._stage1_device)
+                        ctx_all = self._stage1.extract_context(feats_t, edges_t, smask_t)
+                        ctx = ctx_all[:n_fine].cpu().numpy()
+                    else:
+                        feats = torch.from_numpy(feats_np)
+                        edges = torch.from_numpy(meta["edge_index"]).long()
+                        ctx = extract_stage1_context(
+                            self._stage1, feats.to(self._stage1_device),
+                            edges.to(self._stage1_device),
+                        ).cpu().numpy()
                     self._ctx_cache[short] = ctx
+            if is_multi and n_skipped_ms:
+                print(f"  WARN: {n_skipped_ms} slides missing coarse zarr — dropping them")
+                # Also drop their windows.
+                kept_shorts = set(self._ctx_cache.keys())
+                self.windows = [w for w in windows if w[0] in kept_shorts]
+                for s in list(self._slide_meta.keys()):
+                    if s not in kept_shorts:
+                        self._slide_meta.pop(s)
             print(f"  done in {time.time() - t0:.1f}s "
                   f"(~{ctx.shape[1]}d × {sum(c.shape[0] for c in self._ctx_cache.values()):,} patches)")
             # IMPORTANT: drop the CUDA Stage 1 reference so DataLoader workers
@@ -202,13 +235,31 @@ class RegionDataset(Dataset):
             return self._ctx_cache[short]
         meta = self._slide_meta[short]
         z = self._zarr(short)
-        feats = torch.from_numpy(np.asarray(z["features"][:])).float()
-        edges = torch.from_numpy(meta["edge_index"]).long()
+        feats_np = np.asarray(z["features"][:]).astype(np.float32)
+        is_multi = bool(getattr(self._stage1, "_is_multi_scale", False))
         with torch.no_grad():
-            ctx = extract_stage1_context(
-                self._stage1, feats.to(self._stage1_device),
-                edges.to(self._stage1_device),
-            ).cpu().numpy()
+            if is_multi:
+                from multiscale_dataset import build_multiscale_inputs_np
+                ms = build_multiscale_inputs_np(
+                    feats_np, meta["coords"], meta["edge_index"],
+                    meta["cancer_type"], meta["slide_id_full"],
+                )
+                if ms is None:
+                    raise RuntimeError(
+                        f"multi-scale Stage 1 set but coarse zarr missing for {short}"
+                    )
+                feats_combined, edges_combined, scale_mask, n_fine = ms
+                feats_t = torch.from_numpy(feats_combined).to(self._stage1_device)
+                edges_t = torch.from_numpy(edges_combined).long().to(self._stage1_device)
+                smask_t = torch.from_numpy(scale_mask).to(self._stage1_device)
+                ctx = self._stage1.extract_context(feats_t, edges_t, smask_t)[:n_fine].cpu().numpy()
+            else:
+                feats = torch.from_numpy(feats_np)
+                edges = torch.from_numpy(meta["edge_index"]).long()
+                ctx = extract_stage1_context(
+                    self._stage1, feats.to(self._stage1_device),
+                    edges.to(self._stage1_device),
+                ).cpu().numpy()
         self._ctx_cache[short] = ctx
         if len(self._ctx_cache) > self._ctx_lru:
             self._ctx_cache.popitem(last=False)

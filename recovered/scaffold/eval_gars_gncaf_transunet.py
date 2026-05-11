@@ -43,11 +43,69 @@ from eval_gars_cascade import (
 import prepare_segmentation as ps
 
 
-def load_gncaf_transunet(ckpt_path: str, device: torch.device) -> GNCAFPixelDecoder:
+def load_gncaf_transunet(ckpt_path: str, device: torch.device):
+    """Load GNCAF or GCUNet (v3.59) — auto-detected via `model_class`
+    field in the checkpoint or by sniffing the state_dict for the
+    GCUNetPixelDecoder-only `gcn.mlp.*` keys.
+    """
     obj = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     cfg = obj.get("config", {}) or {}
     m = cfg.get("model", cfg)
-    model = GNCAFPixelDecoder(
+    state_dict = obj["model_state_dict"]
+    model_class_name = obj.get("model_class") or m.get("model_class") or "gncaf"
+    has_slide_head = any(k.startswith("slide_head.") for k in state_dict)
+    is_strict = model_class_name == "strict" or any(k.endswith("gcn_layers.0.tau") or k.endswith(".q_proj.weight") and "gcn" in k for k in state_dict)
+    if is_strict:
+        from gncaf_strict_model import GNCAFStrict
+        Model = GNCAFStrict
+        cls_name = "GNCAFStrict"
+        kwargs = dict()
+        # Strict has gcn_hidden_dim + fusion_heads knobs not in vanilla cfg.
+        if "gcn_hidden_dim" in m:
+            kwargs["gcn_hidden_dim"] = int(m["gcn_hidden_dim"])
+        if "fusion_heads" in m:
+            kwargs["fusion_heads"] = int(m["fusion_heads"])
+    elif model_class_name == "gcunet" or any(k.startswith("gcn.mlp.") for k in state_dict):
+        from gcunet_model import GCUNetPixelDecoder
+        Model = GCUNetPixelDecoder
+        cls_name = "GCUNetPixelDecoder"
+        kwargs = dict()
+    elif any(k.startswith("patch_encoder.stem.") for k in state_dict):
+        # Family-B reconstruction (lost custom-small architecture).
+        # Infer hidden_dim, n_transformer_layers, and decoder norm type from the state_dict.
+        from gncaf_family_b_model import GNCAFFamilyB
+        hidden_dim = int(state_dict["patch_encoder.pos_embed"].shape[-1])
+        n_tx_layers = sum(
+            1 for k in state_dict
+            if k.startswith("patch_encoder.transformer.layers.") and k.endswith(".self_attn.in_proj_weight")
+        )
+        feature_dim = int(state_dict["context_aggregator.feature_proj.0.weight"].shape[1])
+        n_classes = int(state_dict["head_seg.weight"].shape[0])
+        # Decoder norm: BN if running_mean keys present, else GN.
+        decoder_norm = "bn" if "pixel_decoder.up1.1.running_mean" in state_dict else "gn"
+        model = GNCAFFamilyB(
+            hidden_dim=hidden_dim,
+            n_transformer_layers=n_tx_layers,
+            feature_dim=feature_dim,
+            n_classes=n_classes,
+            decoder_norm=decoder_norm,
+        )
+        model.load_state_dict(state_dict, strict=True)
+        n_params = sum(p.numel() for p in model.parameters())
+        print(f"  Loaded GNCAFFamilyB strict-OK ({n_params:,} params, "
+              f"hidden_dim={hidden_dim}, n_tx_layers={n_tx_layers}, "
+              f"decoder_norm={decoder_norm}, "
+              f"epoch={obj.get('epoch')}, "
+              f"saved best_mdice={float(obj.get('best_mdice', 0)):.4f})")
+        return model.to(device).eval()
+    else:
+        Model = GNCAFPixelDecoder
+        cls_name = "GNCAFPixelDecoder"
+        # Detect dual-sigmoid head by looking for head_tls.weight in the state_dict.
+        is_dual = any(k.startswith("head_tls.") or k.startswith("head_gc.") for k in state_dict)
+        head_mode = "dual_sigmoid" if is_dual else "argmax"
+        kwargs = dict(slide_aux_head=has_slide_head, head_mode=head_mode)
+    model = Model(
         hidden_size=m.get("hidden_size", 768),
         n_classes=m.get("n_classes", 3),
         n_encoder_layers=m.get("n_encoder_layers", 6),
@@ -57,17 +115,21 @@ def load_gncaf_transunet(ckpt_path: str, device: torch.device) -> GNCAFPixelDeco
         n_fusion_layers=m.get("n_fusion_layers", 1),
         feature_dim=m.get("feature_dim", 1536),
         dropout=0.0,
+        **kwargs,
     )
-    model.load_state_dict(obj["model_state_dict"], strict=True)
+    model.load_state_dict(state_dict, strict=True)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"  Loaded GNCAFPixelDecoder strict-OK ({n_params:,} params, "
+    print(f"  Loaded {cls_name} strict-OK ({n_params:,} params, "
           f"epoch={obj.get('epoch')}, "
           f"saved best_mdice={float(obj.get('best_mdice', 0)):.4f})")
     return model.to(device).eval()
 
 
 class _SlideTileDataset(Dataset):
-    def __init__(self, wsi_path: str, mask_path: str, coords: np.ndarray):
+    def __init__(self, wsi_path: str, mask_path: str | None, coords: np.ndarray):
+        """If `mask_path` is None, the slide is GT-negative and every
+        per-tile mask is returned as an all-zero tile (no TLS / no GC).
+        """
         self.wsi_path = wsi_path
         self.mask_path = mask_path
         self.coords = coords
@@ -78,8 +140,9 @@ class _SlideTileDataset(Dataset):
         if self._wsi_z is None:
             self._wsi_z = zarr.open(
                 tifffile.imread(self.wsi_path, aszarr=True, level=0), mode="r")
-            self._mask_z = zarr.open(
-                tifffile.imread(self.mask_path, aszarr=True, level=0), mode="r")
+            if self.mask_path is not None:
+                self._mask_z = zarr.open(
+                    tifffile.imread(self.mask_path, aszarr=True, level=0), mode="r")
 
     def __len__(self):
         return self.coords.shape[0]
@@ -88,7 +151,13 @@ class _SlideTileDataset(Dataset):
         self._open()
         x, y = int(self.coords[i, 0]), int(self.coords[i, 1])
         rgb = _read_target_rgb_tile(self._wsi_z, x, y)
-        mask = _read_target_mask_tile(self._mask_z, x, y)
+        if self._mask_z is None:
+            # GT-negative slide: synthesise a zero mask of the same shape
+            # as a real one so the rest of the pipeline (Dice agg,
+            # per-tile counts) treats every prediction as a false positive.
+            mask = np.zeros_like(rgb[..., 0], dtype=np.uint8)
+        else:
+            mask = _read_target_mask_tile(self._mask_z, x, y)
         return {
             "rgb": _normalise_rgb(rgb),
             "mask": torch.from_numpy(mask.astype(np.int64)),
@@ -115,11 +184,22 @@ def eval_one_slide(model: GNCAFPixelDecoder, entry: dict, device: torch.device,
 
     wsi_path = slide_wsi_path(entry)
     mask_path = slide_mask_path(entry)
-    if not (os.path.exists(wsi_path) and mask_path and os.path.exists(mask_path)):
+    is_gt_negative = entry.get("mask_path") is None
+    if not wsi_path or not os.path.exists(wsi_path):
         return {"_skip": True, "slide_id": short}
+    if not is_gt_negative and (not mask_path or not os.path.exists(mask_path)):
+        # Mask file declared but not on disk locally → skip rather than
+        # silently mis-evaluate as negative.
+        return {"_skip": True, "slide_id": short}
+    if is_gt_negative:
+        mask_path = None  # signal to _SlideTileDataset
 
     # Pre-compute graph context once per slide.
-    node_context = model.gcn(features, edge_index)        # (N, hidden)
+    is_family_b = hasattr(model, "context_aggregator") and hasattr(model, "patch_encoder")
+    if is_family_b:
+        node_context = model.context_aggregator(features, edge_index)  # (N, hidden_dim)
+    else:
+        node_context = model.gcn(features, edge_index)                   # (N, hidden)
 
     ds = _SlideTileDataset(wsi_path, mask_path, coords_np)
     loader = DataLoader(
@@ -133,6 +213,15 @@ def eval_one_slide(model: GNCAFPixelDecoder, entry: dict, device: torch.device,
     grid_x -= grid_x.min(); grid_y -= grid_y.min()
     H_g, W_g = int(grid_y.max()) + 1, int(grid_x.max()) + 1
 
+    # For argmax models, the legacy 3-class grid is used (0/1/2 exclusive).
+    # For dual-sigmoid models, TLS and GC are independent: keep separate
+    # boolean grids to avoid penalising one head for the other firing.
+    is_dual = (not is_family_b) and getattr(model, "head_mode", "argmax") == "dual_sigmoid"
+    if is_dual:
+        pred_tls_grid = np.zeros((H_g, W_g), dtype=bool)
+        pred_gc_grid = np.zeros((H_g, W_g), dtype=bool)
+        target_tls_grid = np.zeros((H_g, W_g), dtype=bool)
+        target_gc_grid = np.zeros((H_g, W_g), dtype=bool)
     pred_grid = np.zeros((H_g, W_g), dtype=np.int64)
     target_grid = np.zeros((H_g, W_g), dtype=np.int64)
     agg = {1: [0, 0], 2: [0, 0]}
@@ -144,23 +233,60 @@ def eval_one_slide(model: GNCAFPixelDecoder, entry: dict, device: torch.device,
         gt = batch["mask"].to(device, non_blocking=True)
 
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-            tokens, skips = model.encoder(rgb)
             local_ctx = node_context[target_idx]
-            ctx_t = local_ctx.unsqueeze(1)
-            x = torch.cat([ctx_t, tokens], dim=1)
-            for blk in model.fusion:
-                x = blk(x)
-            x = x[:, 1:]
-            x = x.transpose(1, 2).reshape(rgb.shape[0], -1, 16, 16)
-            x = model.decoder(x, skips)
-            logits = model.head_seg(x)
-        argmax = logits.argmax(dim=1)
-        for cls in (1, 2):
-            p = (argmax == cls); t = (gt == cls)
-            agg[cls][0] += int((p & t).sum().item())
-            agg[cls][1] += int((p.sum() + t.sum()).item())
+            tls_pred = None; gc_pred = None
+            if is_family_b:
+                tokens, skip32, skip64 = model.patch_encoder(rgb)
+                fused = model.fusion(tokens, local_ctx)
+                B = rgb.shape[0]
+                feat = fused.transpose(1, 2).reshape(B, -1, 16, 16)
+                x = model.pixel_decoder(feat, skip32, skip64)
+                logits = model.head_seg(x)
+                argmax = logits.argmax(dim=1)
+            else:
+                tokens, skips = model.encoder(rgb)
+                ctx_t = local_ctx.unsqueeze(1)
+                x = torch.cat([ctx_t, tokens], dim=1)
+                for blk in model.fusion:
+                    x = blk(x)
+                x = x[:, 1:]
+                x = x.transpose(1, 2).reshape(rgb.shape[0], -1, 16, 16)
+                x = model.decoder(x, skips)
+                if is_dual:
+                    tls_logits = model.head_tls(x)
+                    gc_logits = model.head_gc(x)
+                    tls_pred = (torch.sigmoid(tls_logits) > 0.5).squeeze(1)
+                    gc_pred = (torch.sigmoid(gc_logits) > 0.5).squeeze(1)
+                    # Keep a 3-class argmax for legacy fields, but only used for
+                    # n_tls_pred / n_gc_pred patch counting; class Dice below
+                    # uses tls_pred / gc_pred *independently*.
+                    argmax = torch.zeros_like(gt)
+                    argmax = torch.where(tls_pred, torch.full_like(gt, 1), argmax)
+                    argmax = torch.where(gc_pred, torch.full_like(gt, 2), argmax)
+                else:
+                    logits = model.head_seg(x)
+                    argmax = logits.argmax(dim=1)
+
+        if is_dual:
+            # TLS Dice: target_tls = (gt >= 1)  (GC pixels are also TLS biologically).
+            # GC Dice: target_gc = (gt == 2). Independent thresholds, no argmax collapse.
+            t_tls = (gt >= 1)
+            t_gc = (gt == 2)
+            agg[1][0] += int((tls_pred & t_tls).sum().item())
+            agg[1][1] += int((tls_pred.sum() + t_tls.sum()).item())
+            agg[2][0] += int((gc_pred & t_gc).sum().item())
+            agg[2][1] += int((gc_pred.sum() + t_gc.sum()).item())
+        else:
+            for cls in (1, 2):
+                p = (argmax == cls); t = (gt == cls)
+                agg[cls][0] += int((p & t).sum().item())
+                agg[cls][1] += int((p.sum() + t.sum()).item())
+
         p_np = argmax.cpu().numpy(); t_np = gt.cpu().numpy()
         idx_np = target_idx.cpu().numpy()
+        if is_dual:
+            tls_pred_np = tls_pred.cpu().numpy()
+            gc_pred_np = gc_pred.cpu().numpy()
         for b in range(p_np.shape[0]):
             i = int(idx_np[b])
             tile_p = p_np[b]; tile_t = t_np[b]
@@ -168,13 +294,30 @@ def eval_one_slide(model: GNCAFPixelDecoder, entry: dict, device: torch.device,
             n_gc_t = int((tile_t == 2).sum()); n_tls_t = int((tile_t == 1).sum())
             pred_grid[grid_y[i], grid_x[i]] = 2 if n_gc_p > 0 else (1 if n_tls_p > 0 else 0)
             target_grid[grid_y[i], grid_x[i]] = 2 if n_gc_t > 0 else (1 if n_tls_t > 0 else 0)
+            if is_dual:
+                # Independent patch-grid flags: a patch is TLS-pred-positive
+                # if any pixel from the TLS head fires (regardless of GC head),
+                # and GC-pred-positive if any GC pixel fires. Target uses
+                # GC ⊂ TLS semantics: TLS target = (gt >= 1).
+                pred_tls_grid[grid_y[i], grid_x[i]] = bool(tls_pred_np[b].any())
+                pred_gc_grid[grid_y[i], grid_x[i]] = bool(gc_pred_np[b].any())
+                target_tls_grid[grid_y[i], grid_x[i]] = bool((tile_t >= 1).any())
+                target_gc_grid[grid_y[i], grid_x[i]] = bool((tile_t == 2).any())
     t_total = time.time() - t0
 
-    return {
+    result = {
         "slide_id": short, "cancer_type": entry["cancer_type"],
         "agg": agg, "pred_grid": pred_grid, "target_grid": target_grid,
         "n_total": n, "t_total": t_total,
+        "gt_negative": bool(is_gt_negative),
     }
+    if is_dual:
+        result["pred_tls_grid"] = pred_tls_grid
+        result["pred_gc_grid"] = pred_gc_grid
+        result["target_tls_grid"] = target_tls_grid
+        result["target_gc_grid"] = target_gc_grid
+        result["dual_sigmoid"] = True
+    return result
 
 
 @hydra.main(version_base=None, config_path="configs/gncaf",
@@ -195,7 +338,14 @@ def main(cfg: DictConfig) -> None:
         k_folds=cfg.get("k_folds", 5),
         fold_idx=cfg.get("fold_idx", 0),
     )
-    val_entries = [e for e in val_entries if e.get("mask_path")]
+    # Full-cohort eval by default: include GT-negative slides so detection
+    # CMs / PR-AUC / AUROC reflect the true cohort. Set
+    # cfg.eval_positives_only=true to restore the legacy positive-only pool.
+    if bool(cfg.get("eval_positives_only", False)):
+        val_entries = [e for e in val_entries if e.get("mask_path")]
+    n_neg = sum(1 for e in val_entries if not e.get("mask_path"))
+    print(f"  cohort: {len(val_entries) - n_neg} GT-pos + {n_neg} GT-neg "
+          f"(eval_positives_only={cfg.get('eval_positives_only', False)})")
     if cfg.get("limit_slides"):
         val_entries = val_entries[: int(cfg.limit_slides)]
         print(f"  limit_slides={cfg.limit_slides}")
@@ -235,25 +385,39 @@ def main(cfg: DictConfig) -> None:
             agg_total[cls][0] += r["agg"][cls][0]
             agg_total[cls][1] += r["agg"][cls][1]
         sid = r["slide_id"]
-        gt_n_tls, gt_n_gc = gt_counts.get(sid, (
-            count_components(r["target_grid"], 1),
-            count_components(r["target_grid"], 2),
-        ))
+        if r.get("gt_negative"):
+            gt_n_tls, gt_n_gc = 0, 0
+        else:
+            gt_n_tls, gt_n_gc = gt_counts.get(sid, (
+                count_components(r["target_grid"], 1),
+                count_components(r["target_grid"], 2),
+            ))
         n_tls_pred = count_components_filtered(r["pred_grid"], 1,
                                                 int(cfg.min_component_size),
                                                 int(cfg.closing_iters))
         n_gc_pred = count_components_filtered(r["pred_grid"], 2,
                                                int(cfg.min_component_size),
                                                int(cfg.closing_iters))
-        p, tg = r["pred_grid"], r["target_grid"]
-        tls_d_grid = dice_score(p, tg, 1)
-        gc_d_grid = dice_score(p, tg, 2)
+        if r.get("dual_sigmoid"):
+            # Dual-sigmoid: independent boolean grids per class, no argmax collapse.
+            # TLS Dice uses target_tls = (gt >= 1) which includes GC pixels.
+            ptg, ttg = r["pred_tls_grid"], r["target_tls_grid"]
+            pgg, tgg = r["pred_gc_grid"], r["target_gc_grid"]
+            inter_t = int((ptg & ttg).sum()); denom_t = int(ptg.sum() + ttg.sum())
+            inter_g = int((pgg & tgg).sum()); denom_g = int(pgg.sum() + tgg.sum())
+            tls_d_grid = (2 * inter_t / denom_t) if denom_t else (1.0 if ptg.sum() == 0 else 0.0)
+            gc_d_grid = (2 * inter_g / denom_g) if denom_g else (1.0 if pgg.sum() == 0 else 0.0)
+        else:
+            p, tg = r["pred_grid"], r["target_grid"]
+            tls_d_grid = dice_score(p, tg, 1)
+            gc_d_grid = dice_score(p, tg, 2)
 
         per_slide.append({
             "slide_id": sid, "cancer_type": r["cancer_type"],
             "tls_dice_grid": tls_d_grid, "gc_dice_grid": gc_d_grid,
             "n_tls_pred": n_tls_pred, "n_gc_pred": n_gc_pred,
             "gt_n_tls": gt_n_tls, "gt_n_gc": gt_n_gc,
+            "gt_negative": bool(r.get("gt_negative", False)),
             "n_total": r["n_total"], "t_total": r["t_total"],
         })
         if (k + 1) % 5 == 0:

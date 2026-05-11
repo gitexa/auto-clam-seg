@@ -412,8 +412,11 @@ class GNCAFPixelDecoder(nn.Module):
         n_fusion_layers: int = 1,
         feature_dim: int = 1536,
         dropout: float = 0.1,
+        slide_aux_head: bool = False,    # v3.61: enable slide-level BCE head
+        head_mode: str = "argmax",        # v3.63: "argmax" | "dual_sigmoid"
     ):
         super().__init__()
+        self.head_mode = head_mode
         self.encoder = TransUNetEncoder(
             hidden_size=hidden_size, n_layers=n_encoder_layers,
             n_heads=n_heads, mlp_dim=mlp_dim, dropout=dropout,
@@ -427,7 +430,26 @@ class GNCAFPixelDecoder(nn.Module):
             for _ in range(n_fusion_layers)
         ])
         self.decoder = TransUNetDecoder(in_dim=hidden_size)
-        self.head_seg = nn.Conv2d(16, n_classes, 3, padding=1)
+        if head_mode == "dual_sigmoid":
+            # v3.63: independent binary heads (TLS and GC can co-occur per pixel,
+            # matching the biology — GC is nested inside TLS).
+            self.head_tls = nn.Conv2d(16, 1, 3, padding=1)
+            self.head_gc = nn.Conv2d(16, 1, 3, padding=1)
+            self.head_seg = None
+        else:
+            self.head_seg = nn.Conv2d(16, n_classes, 3, padding=1)
+            self.head_tls = None
+            self.head_gc = None
+        # v3.61 — optional slide-level "is this slide TLS-positive?" head.
+        # Operates on the mean-pooled GCN node-context for the slide.
+        self.has_slide_head = bool(slide_aux_head)
+        if self.has_slide_head:
+            self.slide_head = nn.Sequential(
+                nn.LayerNorm(hidden_size),
+                nn.Linear(hidden_size, 1),
+            )
+        else:
+            self.slide_head = None
 
     def forward(
         self,
@@ -435,10 +457,16 @@ class GNCAFPixelDecoder(nn.Module):
         all_features: torch.Tensor,
         target_idx: torch.Tensor,
         edge_index: torch.Tensor,
-    ) -> torch.Tensor:
+        return_slide_logit: bool = False,
+    ):
         tokens, skips = self.encoder(target_rgb)               # (B, 256, 768), skip tuple
         node_ctx = self.gcn(all_features, edge_index)          # (N, 768)
         local_ctx = node_ctx[target_idx]                       # (B, 768)
+
+        # Slide-level logit from mean-pooled node context (v3.61 path).
+        slide_logit = None
+        if self.has_slide_head and self.slide_head is not None:
+            slide_logit = self.slide_head(node_ctx.mean(dim=0)).squeeze(-1)
 
         # Prepend ctx token, fuse, drop ctx token.
         ctx_t = local_ctx.unsqueeze(1)                          # (B, 1, 768)
@@ -451,16 +479,30 @@ class GNCAFPixelDecoder(nn.Module):
         b, t, d = x.shape
         x = x.transpose(1, 2).reshape(b, d, 16, 16)
         x = self.decoder(x, skips)                              # (B, 16, 256, 256)
-        return self.head_seg(x)                                 # (B, 3, 256, 256)
+        if self.head_mode == "dual_sigmoid":
+            tls_logits = self.head_tls(x)                       # (B, 1, 256, 256)
+            gc_logits = self.head_gc(x)                         # (B, 1, 256, 256)
+            seg_logits = (tls_logits, gc_logits)
+        else:
+            seg_logits = self.head_seg(x)                       # (B, 3, 256, 256)
+
+        if return_slide_logit:
+            return seg_logits, slide_logit
+        return seg_logits
 
 
 def model_summary(m: GNCAFPixelDecoder) -> dict:
+    if m.head_seg is not None:
+        head_params = sum(p.numel() for p in m.head_seg.parameters())
+    else:
+        head_params = (sum(p.numel() for p in m.head_tls.parameters())
+                       + sum(p.numel() for p in m.head_gc.parameters()))
     return {
         "encoder": sum(p.numel() for p in m.encoder.parameters()),
         "gcn":     sum(p.numel() for p in m.gcn.parameters()),
         "fusion":  sum(p.numel() for p in m.fusion.parameters()),
         "decoder": sum(p.numel() for p in m.decoder.parameters()),
-        "head":    sum(p.numel() for p in m.head_seg.parameters()),
+        "head":    head_params,
         "total":   sum(p.numel() for p in m.parameters()),
     }
 

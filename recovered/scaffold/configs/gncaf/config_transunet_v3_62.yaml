@@ -1,0 +1,67 @@
+defaults:
+  - _self_
+stage: gncaf
+label: v3.62_strict_paper_repro
+seed: 42
+k_folds: 5
+fold_idx: 0
+out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
+
+# v3.62 = paper-strict GNCAF / GCUNet reimplementation.
+#
+# Key deviations from v3.58 (toward paper):
+#   * model_class: strict           # use GNCAFStrict (gncaf_strict_model.py)
+#   * gcn_hidden_dim: 128           # paper §4.2 (was 768 in v3.58 — tied to encoder)
+#   * fusion_heads: 8               # paper §3.1 (was 12 in v3.58 — tied to encoder)
+#   * GCN aggregation: softmax-attention with learnable temperature (paper §4.2)
+#   * Multi-hop rule: concat-all-hops + MLP (paper Eq. 3) — same as v3.59
+#   * Fusion: MSA-only, NO MLP (paper Eq. 4 — was full ViTBlock with MLP in v3.58)
+#   * class_weights: [1, 1, 1]      # plain CE (paper Eq. 6 — was [1, 5, 3])
+#   * dice_loss_weight: 0.0         # plain CE (was 0.5)
+#   * freeze_cnn: true              # paper-faithful (was false since v3.51)
+model:
+  model_class: strict
+  hidden_size: 768
+  gcn_hidden_dim: 128
+  fusion_heads: 8
+  n_classes: 3
+  n_encoder_layers: 12
+  n_heads: 12
+  mlp_dim: 3072
+  n_hops: 3
+  n_fusion_layers: 1
+  feature_dim: 1536
+  dropout: 0.1
+
+train:
+  lr: 5.0e-5
+  weight_decay: 1.0e-4
+  epochs: 60
+  patience: 12
+  warmup_epochs: 5
+  class_weights: [1.0, 1.0, 1.0]   # paper Eq. 6 — plain CE
+  max_pos_per_slide: 12
+  bg_per_pos: 1.0
+  num_workers: 12
+  freeze_cnn: true                  # paper-faithful — freeze ImageNet R50
+  amp: true
+  grad_clip: 0.5
+  load_imagenet_r50: true
+  load_imagenet_vit: true
+  augment: true                     # paper unspecified; keep aug for fairness with v3.58
+  dice_loss_weight: 0.0             # paper Eq. 6 — no Dice
+  include_negative_slides: true
+  neg_slide_targets: 8
+
+wandb:
+  enabled: true
+  project: tls-pixel-seg
+  entity: null
+  mode: ${oc.env:WANDB_MODE,online}
+  tags: [v3, gncaf, strict, paper-repro]
+
+hydra:
+  run:
+    dir: ${out_root}/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+  job:
+    chdir: false

@@ -71,7 +71,10 @@ class _SlideTileDataset(Dataset):
     Lives inside a DataLoader with N workers so WSI tile reads overlap
     with the GPU forward of the previous batch.
     """
-    def __init__(self, wsi_path: str, mask_path: str, coords: np.ndarray):
+    def __init__(self, wsi_path: str, mask_path: str | None, coords: np.ndarray):
+        """If `mask_path` is None, the slide is GT-negative and every per-tile
+        mask is returned all-zero.
+        """
         self.wsi_path = wsi_path
         self.mask_path = mask_path
         self.coords = coords
@@ -82,8 +85,9 @@ class _SlideTileDataset(Dataset):
         if self._wsi_z is None:
             self._wsi_z = zarr.open(
                 tifffile.imread(self.wsi_path, aszarr=True, level=0), mode="r")
-            self._mask_z = zarr.open(
-                tifffile.imread(self.mask_path, aszarr=True, level=0), mode="r")
+            if self.mask_path is not None:
+                self._mask_z = zarr.open(
+                    tifffile.imread(self.mask_path, aszarr=True, level=0), mode="r")
 
     def __len__(self):
         return self.coords.shape[0]
@@ -92,7 +96,10 @@ class _SlideTileDataset(Dataset):
         self._open()
         x, y = int(self.coords[i, 0]), int(self.coords[i, 1])
         rgb = _read_target_rgb_tile(self._wsi_z, x, y)
-        mask = _read_target_mask_tile(self._mask_z, x, y)
+        if self._mask_z is None:
+            mask = np.zeros_like(rgb[..., 0], dtype=np.uint8)
+        else:
+            mask = _read_target_mask_tile(self._mask_z, x, y)
         return {
             "rgb": _normalise_rgb(rgb),                                  # (3, 256, 256)
             "mask": torch.from_numpy(mask.astype(np.int64)),             # (256, 256)
@@ -121,8 +128,13 @@ def eval_one_slide(
 
     wsi_path = slide_wsi_path(entry)
     mask_path = slide_mask_path(entry)
-    if not (os.path.exists(wsi_path) and mask_path and os.path.exists(mask_path)):
+    is_gt_negative = entry.get("mask_path") is None
+    if not wsi_path or not os.path.exists(wsi_path):
         return {"_skip": True, "slide_id": short}
+    if not is_gt_negative and (not mask_path or not os.path.exists(mask_path)):
+        return {"_skip": True, "slide_id": short}
+    if is_gt_negative:
+        mask_path = None
 
     # Pre-compute graph context once per slide (shared across all targets).
     node_context = model.context(features, edge_index)              # (N, dim)
@@ -183,6 +195,7 @@ def eval_one_slide(
         "target_grid": target_grid,
         "n_total": n,
         "t_total": t_total,
+        "gt_negative": bool(is_gt_negative),
     }
 
 
@@ -199,8 +212,16 @@ def main(cfg: DictConfig) -> None:
     print(f"checkpoint: {cfg.checkpoint}")
     model = load_gncaf(cfg.checkpoint, device)
 
-    _train, val_entries = build_gncaf_split()
-    val_entries = [e for e in val_entries if e.get("mask_path")]
+    _train, val_entries = build_gncaf_split(
+        seed=cfg.get("seed", 42),
+        k_folds=cfg.get("k_folds", 1),
+        fold_idx=cfg.get("fold_idx", 0),
+    )
+    if bool(cfg.get("eval_positives_only", False)):
+        val_entries = [e for e in val_entries if e.get("mask_path")]
+    n_neg = sum(1 for e in val_entries if not e.get("mask_path"))
+    print(f"  cohort: {len(val_entries) - n_neg} GT-pos + {n_neg} GT-neg "
+          f"(eval_positives_only={cfg.get('eval_positives_only', False)})")
     if cfg.get("limit_slides"):
         val_entries = val_entries[: int(cfg.limit_slides)]
     # Sharding: process every Nth slide starting at offset (for parallel runs).
@@ -242,10 +263,13 @@ def main(cfg: DictConfig) -> None:
             agg_total[cls][1] += r["agg"][cls][1]
 
         sid = r["slide_id"]
-        gt_n_tls, gt_n_gc = gt_counts.get(sid, (
-            count_components(r["target_grid"], 1),
-            count_components(r["target_grid"], 2),
-        ))
+        if r.get("gt_negative"):
+            gt_n_tls, gt_n_gc = 0, 0
+        else:
+            gt_n_tls, gt_n_gc = gt_counts.get(sid, (
+                count_components(r["target_grid"], 1),
+                count_components(r["target_grid"], 2),
+            ))
         n_tls_pred = count_components_filtered(r["pred_grid"], 1,
                                                 int(cfg.min_component_size),
                                                 int(cfg.closing_iters))
@@ -262,6 +286,7 @@ def main(cfg: DictConfig) -> None:
             "tls_dice_grid": tls_d_grid, "gc_dice_grid": gc_d_grid,
             "n_tls_pred": n_tls_pred, "n_gc_pred": n_gc_pred,
             "gt_n_tls": gt_n_tls, "gt_n_gc": gt_n_gc,
+            "gt_negative": bool(r.get("gt_negative", False)),
             "n_total": r["n_total"], "t_total": r["t_total"],
         })
         if (k + 1) % 5 == 0:

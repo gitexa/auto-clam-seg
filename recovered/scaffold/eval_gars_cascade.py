@@ -566,21 +566,32 @@ def main(cfg: DictConfig) -> None:
     entries = ps.build_slide_entries()
     fold_idx = int(cfg.get("fold_idx", 0))
     k_folds = int(cfg.get("k_folds", 1))
+    # Full-cohort evaluation: include GT-negative slides (mask_path=None)
+    # so that the slide-level detection CMs / PR-AUC / AUROC reflect the
+    # true cohort. The legacy "drop mask_path is None" filters are gated
+    # behind cfg.eval_positives_only (default False).
+    positives_only = bool(cfg.get("eval_positives_only", False))
+    def _maybe_filter(es):
+        if positives_only:
+            return [e for e in es if e.get("mask_path") is not None]
+        return list(es)
     if cfg.get("use_test_split", False):
         _folds, test_entries = ps.create_splits(entries, k_folds=1, seed=cfg.seed)
-        val_entries = [e for e in test_entries if e.get("mask_path") is not None]
-        print(f"Using TEST split: {len(val_entries)} slides with masks")
+        val_entries = _maybe_filter(test_entries)
+        print(f"Using TEST split: {len(val_entries)} slides "
+              f"({sum(1 for e in val_entries if e.get('mask_path') is not None)} with masks)")
     elif k_folds == 1 and fold_idx == 0:
         folds_pair, _test = ps.create_splits(entries, k_folds=1, seed=cfg.seed)
-        val_entries = folds_pair[0]
-        val_entries = [e for e in val_entries if e.get("mask_path") is not None]
+        val_entries = _maybe_filter(folds_pair[0])
     else:
         all_folds, _test = ps.create_splits(entries, k_folds=5, seed=cfg.seed)
         if fold_idx < 0 or fold_idx >= len(all_folds):
             raise ValueError(f"fold_idx={fold_idx} out of range")
-        val_entries = [e for e in all_folds[fold_idx] if e.get("mask_path") is not None]
+        val_entries = _maybe_filter(all_folds[fold_idx])
+        n_neg = sum(1 for e in val_entries if e.get("mask_path") is None)
         print(f"Using fold {fold_idx} as val "
-              f"(seed={cfg.seed}, k_folds={k_folds}, {len(val_entries)} mask slides)")
+              f"(seed={cfg.seed}, k_folds={k_folds}, "
+              f"{len(val_entries) - n_neg} mask slides + {n_neg} GT-negatives)")
     if cfg.get("limit_slides"):
         val_entries = val_entries[: int(cfg.limit_slides)]
         print(f"  limit_slides={cfg.limit_slides}")
@@ -632,6 +643,7 @@ def main(cfg: DictConfig) -> None:
         )
 
     rows = []
+    per_slide_by_thr: dict[float, list[dict]] = {}
     import zarr
     for thr in cfg.thresholds:
         print(f"\n{'=' * 60}\nTHRESHOLD = {thr}\n{'=' * 60}")
@@ -645,8 +657,7 @@ def main(cfg: DictConfig) -> None:
         for k, entry in enumerate(val_entries):
             short_id = entry["slide_id"].split(".")[0]
             cache = mask_dict.get(short_id)
-            if cache is None:
-                continue
+            is_gt_negative = (cache is None) or (entry.get("mask_path") is None)
             grp = zarr.open(entry["zarr_path"], mode="r")
             features = torch.from_numpy(np.asarray(grp["features"][:])).float()
             coords = torch.from_numpy(np.asarray(grp["coords"][:])).float()
@@ -727,11 +738,19 @@ def main(cfg: DictConfig) -> None:
             t_total = time.time() - t0
 
             # Patch-grid dice (coarse, what we had before — kept for backward compat).
-            target_grid = patch_grid_from_mask_cache(cache, coords, cfg.upsample_factor)
+            if is_gt_negative:
+                # No annotation file ⇒ slide is GT-negative (no TLS, no GC).
+                # Synthesise an all-zero patch grid the right shape so the
+                # rest of the pipeline scores predictions as FPs cleanly.
+                target_grid = np.zeros_like(grid_class, dtype=np.int64)
+            else:
+                target_grid = patch_grid_from_mask_cache(cache, coords, cfg.upsample_factor)
             tls_d = dice_score(grid_class, target_grid, 1)
             gc_d = dice_score(grid_class, target_grid, 2)
 
             # Per-pixel aggregate dice over selected patches' native masks.
+            # GT-negatives have no per-patch GT lookup → every selected
+            # tile gets a zero GT (all selections are FPs).
             slide_lookup = patch_mask_lookup.get(short_id, {})
             for i, tile in pred_tiles.items():
                 gt = slide_lookup.get(int(i))
@@ -749,10 +768,13 @@ def main(cfg: DictConfig) -> None:
             close_iters = int(cfg.get("closing_iters", 0))
             n_tls_pred = count_components_filtered(grid_class, 1, min_size, close_iters)
             n_gc_pred = count_components_filtered(grid_class, 2, min_size, close_iters)
-            gt_n_tls, gt_n_gc = gt_counts.get(short_id, (
-                count_components(target_grid, 1),
-                count_components(target_grid, 2),
-            ))
+            if is_gt_negative:
+                gt_n_tls, gt_n_gc = 0, 0
+            else:
+                gt_n_tls, gt_n_gc = gt_counts.get(short_id, (
+                    count_components(target_grid, 1),
+                    count_components(target_grid, 2),
+                ))
             per_slide.append({
                 "slide_id": short_id, "cancer_type": entry["cancer_type"],
                 "tls_dice": tls_d, "gc_dice": gc_d, "mDice": (tls_d + gc_d) / 2.0,
@@ -762,6 +784,7 @@ def main(cfg: DictConfig) -> None:
                 "n_gc_true": count_components(target_grid, 2),
                 # Metadata ground-truth (gold standard for counting).
                 "gt_n_tls": gt_n_tls, "gt_n_gc": gt_n_gc,
+                "gt_negative": bool(is_gt_negative),
                 "n_selected": n_selected, "n_total": features.shape[0],
                 "t_total": t_total,
             })
@@ -813,6 +836,7 @@ def main(cfg: DictConfig) -> None:
             "n_selected": n_selected_total,
             "n_total": n_total_total, "s_per_slide": per_slide_t,
         })
+        per_slide_by_thr[float(thr)] = per_slide
         if run is not None:
             run.log({
                 "threshold": thr, "mDice": mD, "tls_dice": tls_m, "gc_dice": gc_m,
@@ -828,6 +852,10 @@ def main(cfg: DictConfig) -> None:
               f"{r['gc_dice']:>7.4f} {r['tls_sp']:>7.3f} {r['gc_sp']:>7.3f} {sel_pct:>5.2f}%")
 
     (out_dir / "cascade_results.json").write_text(json.dumps(rows, indent=2))
+    if per_slide_by_thr:
+        (out_dir / "cascade_per_slide.json").write_text(
+            json.dumps(per_slide_by_thr, indent=2, default=str)
+        )
     if run is not None:
         # Pick best mDice threshold for summary.
         if rows:

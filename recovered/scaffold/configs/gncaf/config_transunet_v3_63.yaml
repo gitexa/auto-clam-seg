@@ -1,0 +1,65 @@
+defaults:
+  - _self_
+stage: gncaf
+label: v3.63_dual_sigmoid
+seed: 42
+k_folds: 5
+fold_idx: 0
+out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
+
+# v3.63 — dual-sigmoid heads to fix the structural argmax-vs-nested-classes bug.
+# GC sits inside TLS biologically; multiclass argmax was forcing the rare GC
+# class to "beat" TLS at the same pixels (it can't, with class_weights=[1,5,3]).
+# With independent binary heads + per-class BCE+Dice loss (matching seg_v2.0
+# dual_tls_gc recipe), TLS and GC can co-occur per pixel.
+model:
+  hidden_size: 768
+  n_classes: 3                # used by argmax-mode val Dice; head_mode overrides at logits
+  n_encoder_layers: 12
+  n_heads: 12
+  mlp_dim: 3072
+  n_hops: 3
+  n_fusion_layers: 1
+  feature_dim: 1536
+  dropout: 0.1
+  head_mode: dual_sigmoid     # NEW: replaces head_seg with head_tls + head_gc
+
+train:
+  lr: 5.0e-5
+  weight_decay: 1.0e-4
+  epochs: 60
+  patience: 12
+  warmup_epochs: 5
+  # Loss recipe matching seg_v2.0 dual_tls_gc winner:
+  # dice_weight=2.0 → applied to TLS head (via dice_loss_weight)
+  # gc_dice_weight=5.0 → applied to GC head (via gc_dice_weight)
+  # focal_weight=1.0 → BCE handles this; pos_weight on each head balances the rare classes.
+  class_weights: [1.0, 1.0, 1.0]   # unused under head_mode=dual_sigmoid; kept to silence missing-key
+  dice_loss_weight: 2.0             # → TLS Dice
+  gc_dice_weight: 5.0               # → GC Dice
+  tls_pos_weight: 5.0               # BCE pos_weight for TLS (was implicit ×5 in argmax CE)
+  gc_pos_weight: 30.0               # BCE pos_weight for GC; GC is ~0.06% of pixels → upweight
+  max_pos_per_slide: 12
+  bg_per_pos: 1.0
+  num_workers: 12
+  freeze_cnn: false
+  amp: true
+  grad_clip: 0.5
+  load_imagenet_r50: true
+  load_imagenet_vit: true
+  augment: true
+  include_negative_slides: true
+  neg_slide_targets: 8
+
+wandb:
+  enabled: true
+  project: tls-pixel-seg
+  entity: null
+  mode: ${oc.env:WANDB_MODE,online}
+  tags: [v3, gncaf, transunet, vit12, dual_sigmoid, v3.63]
+
+hydra:
+  run:
+    dir: ${out_root}/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+  job:
+    chdir: false

@@ -54,6 +54,7 @@ def validate(model, val_loader, device, n_classes=3):
     n_slides = 0
     agg = {c: [0, 0] for c in range(n_classes)}
     total_loss, total_pix = 0.0, 0
+    head_mode = getattr(model, "head_mode", "argmax")
     for batch in val_loader:
         for s in batch:
             features = s["features"].to(device, non_blocking=True)
@@ -65,10 +66,25 @@ def validate(model, val_loader, device, n_classes=3):
                 logits = model(target_rgb, features, target_idx, edge_index)
             except torch.cuda.OutOfMemoryError:
                 torch.cuda.empty_cache(); continue
-            loss = F.cross_entropy(logits, target_mask)
+            if head_mode == "dual_sigmoid":
+                tls_logits, gc_logits = logits
+                # Reconstruct argmax-equivalent for the same Dice metric.
+                # Decision rule: GC if gc_logits > 0; else TLS if tls_logits > 0; else bg.
+                tls_pred = (torch.sigmoid(tls_logits) > 0.5).squeeze(1)
+                gc_pred = (torch.sigmoid(gc_logits) > 0.5).squeeze(1)
+                argmax = torch.zeros_like(target_mask)
+                argmax = torch.where(tls_pred, torch.full_like(target_mask, 1), argmax)
+                argmax = torch.where(gc_pred, torch.full_like(target_mask, 2), argmax)
+                # Use BCE sum as a stand-in loss for logging.
+                t_tls = (target_mask >= 1).float().unsqueeze(1)
+                t_gc = (target_mask == 2).float().unsqueeze(1)
+                loss = F.binary_cross_entropy_with_logits(tls_logits, t_tls) + \
+                       F.binary_cross_entropy_with_logits(gc_logits, t_gc)
+            else:
+                loss = F.cross_entropy(logits, target_mask)
+                argmax = logits.argmax(dim=1)
             total_loss += float(loss) * target_mask.numel()
             total_pix += target_mask.numel()
-            argmax = logits.argmax(dim=1)
             for c, (i, d) in per_class_dice_batch(argmax, target_mask, n_classes).items():
                 agg[c][0] += i; agg[c][1] += d
             n_slides += 1
@@ -125,7 +141,17 @@ def main(cfg: DictConfig) -> None:
                             prefetch_factor=2, persistent_workers=True,
                             collate_fn=collate_keep_first)
 
-    model = GNCAFPixelDecoder(
+    model_class_name = cfg.model.get("model_class", "gncaf")
+    if model_class_name == "gcunet":
+        from gcunet_model import GCUNetPixelDecoder
+        Model = GCUNetPixelDecoder
+    elif model_class_name == "strict":
+        from gncaf_strict_model import GNCAFStrict
+        Model = GNCAFStrict
+    else:
+        Model = GNCAFPixelDecoder
+    slide_aux_head = bool(cfg.train.get("slide_aux_loss_weight", 0.0) > 0)
+    model_kwargs = dict(
         hidden_size=cfg.model.hidden_size,
         n_classes=cfg.model.n_classes,
         n_encoder_layers=cfg.model.n_encoder_layers,
@@ -135,9 +161,22 @@ def main(cfg: DictConfig) -> None:
         n_fusion_layers=cfg.model.n_fusion_layers,
         feature_dim=cfg.model.feature_dim,
         dropout=cfg.model.dropout,
-    ).to(device)
+    )
+    if slide_aux_head and Model is GNCAFPixelDecoder:
+        model_kwargs["slide_aux_head"] = True
+    head_mode = str(cfg.model.get("head_mode", "argmax"))
+    if Model is GNCAFPixelDecoder:
+        model_kwargs["head_mode"] = head_mode
+    if model_class_name == "strict":
+        # Pass paper-strict knobs (defaults already paper-faithful in
+        # GNCAFStrict, but allow YAML overrides).
+        if cfg.model.get("gcn_hidden_dim") is not None:
+            model_kwargs["gcn_hidden_dim"] = int(cfg.model.gcn_hidden_dim)
+        if cfg.model.get("fusion_heads") is not None:
+            model_kwargs["fusion_heads"] = int(cfg.model.fusion_heads)
+    model = Model(**model_kwargs).to(device)
     summary = model_summary(model)
-    print(f"GNCAFPixelDecoder params: " +
+    print(f"{type(model).__name__} params: " +
           ", ".join(f"{k}={v:,}" for k, v in summary.items()))
 
     # Load ImageNet-pretrained R50 weights into the encoder trunk.
@@ -178,6 +217,40 @@ def main(cfg: DictConfig) -> None:
         return 1.0 - torch.stack(per_class_dice).mean()
 
     dice_w = float(cfg.train.get("dice_loss_weight", 0.0))
+    slide_aux_w = float(cfg.train.get("slide_aux_loss_weight", 0.0))
+
+    # v3.63 dual-sigmoid loss: independent BCE + Dice on each binary head.
+    tls_pos_w = float(cfg.train.get("tls_pos_weight", 1.0))
+    gc_pos_w = float(cfg.train.get("gc_pos_weight", 1.0))
+    gc_dice_w = float(cfg.train.get("gc_dice_weight", 0.0))
+
+    def binary_dice_loss(logits, target_bin, eps: float = 1e-6):
+        """Binary soft-Dice on a single sigmoid head. logits/target both (B,1,H,W)."""
+        probs = torch.sigmoid(logits)
+        inter = (probs * target_bin).sum(dim=(1, 2, 3))
+        denom = probs.sum(dim=(1, 2, 3)) + target_bin.sum(dim=(1, 2, 3))
+        return (1.0 - (2 * inter + eps) / (denom + eps)).mean()
+
+    def dual_sigmoid_loss(logits_pair, target_mask):
+        """v3.63 dual-sigmoid loss: BCE + Dice on each head, with per-class weights."""
+        tls_logits, gc_logits = logits_pair
+        # target_mask is (B,H,W) with values 0/1/2; biology says GC ⊂ TLS.
+        target_tls = ((target_mask >= 1).float()).unsqueeze(1)  # (B,1,H,W)
+        target_gc = ((target_mask == 2).float()).unsqueeze(1)
+        loss_tls_bce = F.binary_cross_entropy_with_logits(
+            tls_logits, target_tls,
+            pos_weight=torch.tensor(tls_pos_w, device=tls_logits.device),
+        )
+        loss_gc_bce = F.binary_cross_entropy_with_logits(
+            gc_logits, target_gc,
+            pos_weight=torch.tensor(gc_pos_w, device=gc_logits.device),
+        )
+        loss = loss_tls_bce + loss_gc_bce
+        if dice_w > 0:
+            loss = loss + dice_w * binary_dice_loss(tls_logits, target_tls)
+        if gc_dice_w > 0:
+            loss = loss + gc_dice_w * binary_dice_loss(gc_logits, target_gc)
+        return loss
 
     def augment_pair(rgb: torch.Tensor, mask: torch.Tensor):
         """Mirror RGB+mask through random flip + 90° rotation. Per-batch."""
@@ -194,8 +267,20 @@ def main(cfg: DictConfig) -> None:
         return rgb, mask
 
     use_aug = bool(cfg.train.get("augment", False))
-    print(f"  loss: CE(weight={cfg.train.class_weights}) + {dice_w}×Dice"
-          f"  augment={use_aug}")
+    if head_mode == "dual_sigmoid":
+        print(f"  loss: dual_sigmoid BCE(tls_pw={tls_pos_w}, gc_pw={gc_pos_w}) "
+              f"+ {dice_w}×TLS_Dice + {gc_dice_w}×GC_Dice  augment={use_aug}")
+    else:
+        print(f"  loss: CE(weight={cfg.train.class_weights}) + {dice_w}×Dice"
+              f"  augment={use_aug}")
+
+    def compute_loss(logits, target_mask):
+        if head_mode == "dual_sigmoid":
+            return dual_sigmoid_loss(logits, target_mask)
+        loss = F.cross_entropy(logits, target_mask, weight=cw)
+        if dice_w > 0:
+            loss = loss + dice_w * soft_dice_loss(logits, target_mask)
+        return loss
 
     opt = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
@@ -230,15 +315,25 @@ def main(cfg: DictConfig) -> None:
                 target_idx = s["target_idx"].to(device, non_blocking=True)
                 target_rgb = s["target_rgb"].to(device, non_blocking=True)
                 target_mask = s["target_mask"].to(device, non_blocking=True)
+                slide_label = s.get("slide_label")
+                if slide_label is not None:
+                    slide_label = slide_label.to(device, non_blocking=True)
                 if use_aug:
                     target_rgb, target_mask = augment_pair(target_rgb, target_mask)
                 try:
                     if scaler is not None:
                         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                            logits = model(target_rgb, features, target_idx, edge_index)
-                            loss = F.cross_entropy(logits, target_mask, weight=cw)
-                            if dice_w > 0:
-                                loss = loss + dice_w * soft_dice_loss(logits, target_mask)
+                            if getattr(model, "has_slide_head", False) and slide_label is not None and slide_aux_w > 0:
+                                logits, slide_logit = model(target_rgb, features, target_idx, edge_index,
+                                                            return_slide_logit=True)
+                            else:
+                                logits = model(target_rgb, features, target_idx, edge_index)
+                                slide_logit = None
+                            loss = compute_loss(logits, target_mask)
+                            if slide_logit is not None:
+                                loss = loss + slide_aux_w * F.binary_cross_entropy_with_logits(
+                                    slide_logit, slide_label,
+                                )
                         opt.zero_grad(set_to_none=True)
                         scaler.scale(loss).backward()
                         if cfg.train.get("grad_clip", 0) > 0:
@@ -249,10 +344,17 @@ def main(cfg: DictConfig) -> None:
                             )
                         scaler.step(opt); scaler.update()
                     else:
-                        logits = model(target_rgb, features, target_idx, edge_index)
-                        loss = F.cross_entropy(logits, target_mask, weight=cw)
-                        if dice_w > 0:
-                            loss = loss + dice_w * soft_dice_loss(logits, target_mask)
+                        if getattr(model, "has_slide_head", False) and slide_label is not None and slide_aux_w > 0:
+                            logits, slide_logit = model(target_rgb, features, target_idx, edge_index,
+                                                        return_slide_logit=True)
+                        else:
+                            logits = model(target_rgb, features, target_idx, edge_index)
+                            slide_logit = None
+                        loss = compute_loss(logits, target_mask)
+                        if slide_logit is not None:
+                            loss = loss + slide_aux_w * F.binary_cross_entropy_with_logits(
+                                slide_logit, slide_label,
+                            )
                         opt.zero_grad(set_to_none=True)
                         loss.backward()
                         if cfg.train.get("grad_clip", 0) > 0:
@@ -299,6 +401,7 @@ def main(cfg: DictConfig) -> None:
             "epoch": ep, "best_mdice": best_mDice,
             "val_metrics": val_metrics,
             "config": OmegaConf.to_container(cfg, resolve=True),
+            "model_class": model_class_name,
         }, out_dir / "last.pt")
 
         if is_best:
@@ -309,6 +412,7 @@ def main(cfg: DictConfig) -> None:
                 "epoch": ep, "best_mdice": best_mDice,
                 "val_metrics": val_metrics,
                 "config": OmegaConf.to_container(cfg, resolve=True),
+                "model_class": model_class_name,
             }, out_dir / "best_checkpoint.pt")
         else:
             patience_left -= 1

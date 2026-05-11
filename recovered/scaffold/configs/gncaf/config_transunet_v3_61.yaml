@@ -1,0 +1,57 @@
+defaults:
+  - _self_
+stage: gncaf
+label: v3.61_gncaf_heavy_neg_slide_aux
+seed: 42
+k_folds: 5
+fold_idx: 0
+out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
+
+# v3.61 = v3.58 + heavy negatives (B1) + slide-level auxiliary BCE head (B2).
+# Goal: reduce GNCAF's 91% TLS-FP rate on truly-negative slides by
+# (a) more negative-slide patch exposure during training and
+# (b) explicit slide-level "is this slide TLS-positive?" supervision.
+model:
+  hidden_size: 768
+  n_classes: 3
+  n_encoder_layers: 12
+  n_heads: 12
+  mlp_dim: 3072
+  n_hops: 3
+  n_fusion_layers: 1
+  feature_dim: 1536
+  dropout: 0.1
+
+train:
+  lr: 5.0e-5
+  weight_decay: 1.0e-4
+  epochs: 60
+  patience: 12
+  warmup_epochs: 5
+  class_weights: [1.0, 5.0, 3.0]
+  max_pos_per_slide: 12
+  bg_per_pos: 1.0
+  num_workers: 12
+  freeze_cnn: false
+  amp: true
+  grad_clip: 0.5
+  load_imagenet_r50: true
+  load_imagenet_vit: true
+  augment: true
+  dice_loss_weight: 0.5
+  include_negative_slides: true
+  neg_slide_targets: 32           # ← v3.61 change: 4× v3.58's 8 (B1)
+  slide_aux_loss_weight: 0.5      # ← v3.61 change: enables slide-level BCE head (B2)
+
+wandb:
+  enabled: true
+  project: tls-pixel-seg
+  entity: null
+  mode: ${oc.env:WANDB_MODE,online}
+  tags: [v3, gncaf, transunet, vit12, augmented, heavy-negatives, slide-aux]
+
+hydra:
+  run:
+    dir: ${out_root}/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+  job:
+    chdir: false

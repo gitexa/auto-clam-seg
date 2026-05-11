@@ -136,6 +136,11 @@ class GNCAFFastDataset(Dataset):
             "target_rgb": torch.stack(rgbs),
             "target_mask": torch.stack(masks),
             "slide_id": short,
+            # 1.0 if the slide is GT-positive (mask file exists),
+            # 0.0 if GT-negative. Used by v3.61's slide-level
+            # auxiliary BCE head.
+            "slide_label": torch.tensor(0.0 if is_negative_slide else 1.0,
+                                         dtype=torch.float32),
         }
 
 

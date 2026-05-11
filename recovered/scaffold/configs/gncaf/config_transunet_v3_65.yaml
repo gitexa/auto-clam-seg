@@ -1,0 +1,64 @@
+defaults:
+  - _self_
+stage: gncaf
+label: v3.65_dual_sigmoid_simple_loss
+seed: 42
+k_folds: 5
+fold_idx: 0
+out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
+
+# v3.65 — simplest dual-sigmoid loss baseline.
+# v3.63 had heavy weighting (tls_pw=5, gc_pw=30, dice 2.0+5.0); v3.64 dropped
+# tls_pw to 1 (hurt mDice 0.639→0.614). Hypothesis: the dual-sigmoid head is
+# the structural fix; further loss tuning isn't moving the needle. v3.65 strips
+# all class upweighting and uses equal-weight BCE + Dice across both heads.
+# This is the "architecture only, no loss tricks" baseline — if GC dies here,
+# we know dual-sigmoid alone isn't enough. If GC survives, we know the v3.63
+# upweights were overengineering.
+model:
+  hidden_size: 768
+  n_classes: 3
+  n_encoder_layers: 12
+  n_heads: 12
+  mlp_dim: 3072
+  n_hops: 3
+  n_fusion_layers: 1
+  feature_dim: 1536
+  dropout: 0.1
+  head_mode: dual_sigmoid
+
+train:
+  lr: 5.0e-5
+  weight_decay: 1.0e-4
+  epochs: 60
+  patience: 12
+  warmup_epochs: 5
+  class_weights: [1.0, 1.0, 1.0]   # unused under dual_sigmoid
+  dice_loss_weight: 1.0             # equal weight on TLS Dice
+  gc_dice_weight: 1.0               # equal weight on GC Dice
+  tls_pos_weight: 1.0               # no upweight (was 5.0 in v3.63)
+  gc_pos_weight: 1.0                # no upweight (was 30.0 in v3.63)
+  max_pos_per_slide: 12
+  bg_per_pos: 1.0
+  num_workers: 12
+  freeze_cnn: false
+  amp: true
+  grad_clip: 0.5
+  load_imagenet_r50: true
+  load_imagenet_vit: true
+  augment: true
+  include_negative_slides: true
+  neg_slide_targets: 8
+
+wandb:
+  enabled: true
+  project: tls-pixel-seg
+  entity: null
+  mode: ${oc.env:WANDB_MODE,online}
+  tags: [v3, gncaf, transunet, vit12, dual_sigmoid, v3.65, simple_loss]
+
+hydra:
+  run:
+    dir: ${out_root}/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+  job:
+    chdir: false
