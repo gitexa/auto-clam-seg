@@ -107,6 +107,7 @@ def main():
     for label, p in [
         ("GNCAF v3.63 (dual-σ, heavy)",  Path("/tmp/v3_63_train.log")),
         ("GNCAF v3.64 (dual-σ, tls_pw=1)", Path("/tmp/v3_64_train.log")),
+        ("GNCAF v3.65 (dual-σ, simple)", Path("/tmp/v3_65_train.log")),
     ]:
         r = parse_stdout_log(p)
         if r:
@@ -119,12 +120,13 @@ def main():
         r = parse_seg_v2_incremental(d)
         if r:
             trajectories[label] = r
-    # v3.65 (still training, single point)
-    v365_dirs = sorted(EXP.glob("gars_gncaf_v3.65_*"))
-    if v365_dirs:
-        r = parse_v3_65_from_ckpt(v365_dirs[-1])
-        if r:
-            trajectories["GNCAF v3.65 (dual-σ, simple-loss)"] = r
+    # v3.65 ckpt fallback ONLY if stdout log didn't have epochs (e.g. early in run)
+    if "GNCAF v3.65 (dual-σ, simple)" not in trajectories:
+        v365_dirs = sorted(EXP.glob("gars_gncaf_v3.65_*"))
+        if v365_dirs:
+            r = parse_v3_65_from_ckpt(v365_dirs[-1])
+            if r:
+                trajectories["GNCAF v3.65 (dual-σ, simple)"] = r
 
     print(f"Per-epoch trajectories: {len(trajectories)} runs")
     for k, v in trajectories.items():
@@ -138,15 +140,17 @@ def main():
     fig, axes = plt.subplots(1, 3, figsize=(16, 5.5))
     palette = {
         "GNCAF v3.63 (dual-σ, heavy)":          "#8b0000",
-        "GNCAF v3.64 (dual-σ, tls_pw=1)":       "#e377c2",
-        "GNCAF v3.65 (dual-σ, simple-loss)":   "#ff7f0e",
+        "GNCAF v3.64 (dual-σ, tls_pw=1)":       "#cc6677",
+        "GNCAF v3.65 (dual-σ, simple)":         "#aa3322",
+        "GNCAF v3.65 (dual-σ, simple-loss)":    "#aa3322",
         "seg_v2.0 (tls_only)":                  "#7f7f7f",
         "seg_v2.0 (dual)":                       "#525252",
     }
     line_styles = {
         "GNCAF v3.63 (dual-σ, heavy)":          "-",
         "GNCAF v3.64 (dual-σ, tls_pw=1)":       "--",
-        "GNCAF v3.65 (dual-σ, simple-loss)":   ":",
+        "GNCAF v3.65 (dual-σ, simple)":         "-",
+        "GNCAF v3.65 (dual-σ, simple-loss)":    "-",
         "seg_v2.0 (tls_only)":                  "-",
         "seg_v2.0 (dual)":                       "-",
     }

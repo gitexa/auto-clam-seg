@@ -52,6 +52,8 @@ APPROACH_COLORS = {
     "GNCAF v3.61":     "#bcbd22",
     "GNCAF v3.62":     "#17becf",
     "GNCAF v3.63":     "#8b0000",
+    "GNCAF v3.64":     "#cc6677",
+    "GNCAF v3.65":     "#aa3322",
     "Lost-0.7143":     "#e377c2",
     "seg_v2.0":        "#7f7f7f",
     "seg_v2.0 (dual)": "#525252",
@@ -880,6 +882,14 @@ def main():
     if len(v63):
         perslide["GNCAF v3.63"] = v63
         print(f"  v3.63 per-slide rows: {len(v63)} (fold 0 only)")
+    v64 = collect_perslide("v3.64", folds=[0])
+    if len(v64):
+        perslide["GNCAF v3.64"] = v64
+        print(f"  v3.64 per-slide rows: {len(v64)} (fold 0 only)")
+    v65 = collect_perslide("v3.65", folds=[0])
+    if len(v65):
+        perslide["GNCAF v3.65"] = v65
+        print(f"  v3.65 per-slide rows: {len(v65)} (fold 0 only)")
     lost07 = collect_perslide("lost_0p7143", folds=[0])
     if len(lost07):
         perslide["Lost-0.7143"] = lost07
