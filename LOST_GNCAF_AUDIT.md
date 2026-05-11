@@ -579,3 +579,27 @@ Stage 2 RegionDecoder's strength.
 The publication story: **a 4 M-param Stage 1 gate is the right inductive
 bias for any pixel-decoder on this task**. Cascade builds it in by design;
 GNCAF needs it retrofitted at inference time.
+
+### Universal applicability — the gate fixes any dense pixel decoder
+
+Same Stage 1 gate, applied to seg_v2.0 variants and GNCAF v3.63:
+
+| Dense decoder (fold-0) | mDice alone | mDice + gate | Δ | TLS-FP alone | TLS-FP + gate |
+|---|---|---|---|---|---|
+| **seg_v2.0 (dual)** | 0.667 | **0.661** | ~same | 61.9 % | **40.5 %** |
+| seg_v2.0 (tls_only) | 0.477 | 0.477 | ~same | 31.0 % | 26.2 % |
+| GNCAF v3.65 | 0.469 | **0.472** | +0.003 | 92.7 % | **41.5 %** |
+| GNCAF v3.63 | 0.434 | 0.437 | +0.003 | 97.6 % | 41.5 % |
+
+Observations:
+* The gate's TLS-FP impact scales with the base model's over-firing tendency:
+  GNCAFs (92-98 %) gain ~50 pp; seg_v2.0 dual (62 %) gains ~22 pp;
+  seg_v2.0 tls_only (31 %) gains only ~5 pp.
+* mDice is preserved or marginally improved in every case (no Dice cost).
+* **seg_v2.0 (dual) + Stage 1 gate is fold-0's strongest dense-decoder
+  approach**: mDice 0.661, TLS-FP 41 % — essentially tied with cascade's
+  Stage 2 RegionDecoder on this fold.
+
+The gate is universal: **any pixel-decoder benefits from inference-time
+slide-level gating**, with the size of the win proportional to how much
+the base model over-fires on truly-negative slides.

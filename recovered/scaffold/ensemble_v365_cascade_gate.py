@@ -104,7 +104,7 @@ def summarise(rows: list[dict], label: str = "") -> dict:
 def main():
     fold = 0
     cascade_rows = load_cascade_gate(fold=fold)
-    print(f"Loaded {len(cascade_rows)} cascade rows (fold {fold}, threshold 0.5)")
+    print(f"Loaded {len(cascade_rows)} cascade rows (fold {fold}, threshold 0.5)\n")
     for label in ("v3.65", "v3.63", "v3.58"):
         g = load_gncaf_perslide(label, fold=fold)
         if not g:
@@ -112,6 +112,22 @@ def main():
         summarise(g, f"GNCAF {label} alone")
         e = ensemble(g, cascade_rows)
         summarise(e, f"GNCAF {label} + Cascade Stage 1 gate")
+        print()
+    # seg_v2.0 variants — same gate, different dense decoder
+    for label, pat in [
+        ("seg_v2.0 (tls_only)", f"gars_gncaf_eval_seg_v2_fullcohort_fold{fold}_eval_shard*"),
+        ("seg_v2.0 (dual)",      f"gars_gncaf_eval_seg_v2_dual_fullcohort_fold{fold}_eval_shard*"),
+    ]:
+        rows = []
+        for d in sorted(EXP.glob(pat)):
+            p = d / "gncaf_agg.json"
+            if p.exists():
+                rows.extend(json.loads(p.read_text())["per_slide"])
+        if not rows:
+            continue
+        summarise(rows, f"{label} alone")
+        e = ensemble(rows, cascade_rows)
+        summarise(e, f"{label} + Cascade Stage 1 gate")
         print()
 
 
