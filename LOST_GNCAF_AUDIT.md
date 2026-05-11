@@ -527,6 +527,55 @@ GC-FP + pixel-agg TLS, while preserving GC Dice.
 4. **The dense-pixel-decoder paradigm has a structural ceiling**: even v3.65
    has TLS-FP rate 93 % (vs cascade's 41 %). Without a slide-level gate,
    the per-patch decoder cannot avoid firing on lymphoid-but-not-TLS tissue.
-   To beat cascade, GNCAF would need either (a) a Stage-1 gate retrofit
-   like A3, or (b) full-cohort training validation that exposes the model
-   to all tissue patches, not just curated 24/slide.
+
+---
+
+## v3.65 + Cascade Stage 1 ensemble (2026-05-11) — fixes the structural ceiling
+
+The TLS-FP ceiling predicted above can be **resolved at inference time** by
+gating v3.65's predictions with cascade Stage 1's slide-level decision (the
+same Stage 1 used in the cascade champion, already trained on all 1015 slides
+including negatives). Implementation: ~30 lines of Python, no retraining.
+
+### Recipe
+
+For each slide:
+- If cascade Stage 1 selected `n_selected == 0` patches above its 0.5 gate
+  (i.e. Stage 1 said "no TLS"), suppress v3.65's predictions entirely on
+  that slide.
+- Otherwise, keep v3.65's dense predictions as-is.
+
+### Result
+
+| Metric | v3.65 alone | **v3.65 + Stage 1 gate** | Δ |
+|---|---|---|---|
+| TLS Dice (per-slide) | 0.275 | 0.272 | ~same |
+| GC Dice (per-slide) | 0.664 | 0.672 | ~same |
+| mDice (per-slide) | 0.469 | **0.472** | +0.003 |
+| **TLS-FP rate** | **92.7 %** | **41.5 %** | **−51.2 pp** |
+| GC-FP rate | 4.9 % | 4.9 % | same |
+| Mean TLS pred / neg slide | 14.4 | **6.1** | −8.3 |
+| Slides Stage 1 gated to zero | 0 | **27 / 165** | — |
+
+### Final ranking with ensemble
+
+| Rank | Architecture | mDice | TLS-FP | GC-FP |
+|---|---|---|---|---|
+| 🏆 | Cascade v3.37 | **0.649** | 41 % | 5 % |
+| 🥈 | seg_v2.0 (dual) | 0.622 | 51 % | 5.3 % |
+| 🥉 | **v3.65 + Stage 1 gate (NEW)** | **0.472** | **41.5 %** ← matches cascade | 4.9 % |
+| 4 | GNCAF v3.65 (alone) | 0.469 | 92.7 % | 4.9 % |
+| 5 | GNCAF v3.63 | 0.438 | 97.6 % | 12.2 % |
+
+### Takeaway
+
+The cascade Stage 1 gate is doing the slide-level work that the dense-pixel
+decoder cannot do alone. The ensemble closes the FP gap completely
+(v3.65 ensemble TLS-FP = 41.5 % ≈ cascade's 41 %) at zero training cost.
+The remaining mDice gap (cascade 0.649 vs ensemble 0.472) is now purely
+about pixel-level segmentation quality on positive slides — which is the
+Stage 2 RegionDecoder's strength.
+
+The publication story: **a 4 M-param Stage 1 gate is the right inductive
+bias for any pixel-decoder on this task**. Cascade builds it in by design;
+GNCAF needs it retrofitted at inference time.
