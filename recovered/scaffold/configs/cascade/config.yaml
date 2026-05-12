@@ -24,8 +24,11 @@ thresholds: [0.05, 0.10, 0.20, 0.30, 0.40, 0.50]
 upsample_factor: 4
 s2_batch: 64
 # Counting post-processing on the patch grid before connected components.
-min_component_size: 1   # drop instances smaller than this many cells
-closing_iters: 0        # binary closing iterations (fills 1-cell gaps)
+# 2026-05-12: bumped from min_size=1, closing=0 to min_size=2, closing=1
+# per FP_REDUCTION_RESULTS.md — drops TLS-FP from 41.5% to 31.7% on fold-0
+# fullcohort at essentially zero mDice cost (0.719 → 0.717).
+min_component_size: 2   # drop singleton-cell predictions (noise)
+closing_iters: 1        # fill 1-cell gaps in TLS clusters
 top_k_frac: null        # if set (e.g., 0.005), select top-K% of patches per
                         # slide instead of using absolute `threshold` (adaptive)
 min_top_k: 10           # floor on top-K count per slide
