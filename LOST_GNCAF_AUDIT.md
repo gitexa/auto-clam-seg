@@ -644,6 +644,54 @@ metric was already the union.
 
 ---
 
+## v3.62 paper-strict 5-fold validation (2026-05-12)
+
+Up to 2026-05-11 only fold-0 of the "newer" GNCAF variants (v3.62 / v3.65 /
+v3.65+gate) was evaluated on full cohort. User requested proper 5-fold for
+the best one (v3.62 paper-strict argmax, fold-0 mDice 0.508). 4 additional
+folds trained + evaluated; fold-0 already done.
+
+### Per-fold breakdown (full-cohort, union TLS Dice)
+
+| Fold | n_pos | n_neg | TLS Dice | GC Dice | mDice | TLS-FP | GC-FP |
+|---|---|---|---|---|---|---|---|
+| 0 | 124 | 41 | 0.331 | 0.685 | **0.508** | 85.4 % | 2.4 % |
+| 1 | 117 | 40 | 0.270 | 0.435 | **0.353** | 97.5 % | 15.0 % |
+| 2 | 120 | 42 | 0.254 | 0.667 | **0.460** | 85.7 % | 0.0 % |
+| 3 | 120 | 39 | 0.218 | 0.592 | **0.405** | 97.4 % | 0.0 % |
+| 4 | 117 | 44 | 0.367 | 0.578 | **0.473** | 93.2 % | 9.1 % |
+| **5-fold** | | | **0.288 ± 0.054** | **0.591 ± 0.088** | **0.440 ± 0.055** | **91.8 % ± 5.4 %** | **5.3 % ± 5.9 %** |
+
+### Key observations
+
+* **Fold variance**: mDice ranges 0.35 to 0.51 across folds — substantial
+  but consistent at ~0.44 ± 0.05.
+* **GC behaviour is fold-dependent**: GC Dice ranges from 0.44 to 0.69.
+  Plain-CE collapse: GC was zero during training on folds 0, 2, 3, 4 but
+  patches across these folds still yielded modest per-slide GC Dice due to
+  the per-slide-mean aggregation (slides with no GC GT contribute Dice=1
+  when pred also has no GC).
+* **TLS-FP rate ~92 %**: paper-strict (plain CE + freeze CNN) does NOT
+  reduce TLS over-firing on negatives. Same dense-decoder ceiling as v3.58
+  (95 %) and v3.65 (93 %).
+* **Compared to cascade (0.719) and seg_v2.0 dual (0.667)**: v3.62 at 0.440
+  is **~0.28-0.23 mDice below** the production champions.
+
+### Conclusion
+
+The "best GNCAF" claim (fold-0 mDice 0.508) was the fold-0 outlier. With
+honest 5-fold CV, v3.62 lands at mDice **0.44 ± 0.06**, materially below
+cascade and seg_v2.0 dual. The dense-pixel-decoder paradigm is structurally
+limited; even paper-strict with plain CE doesn't close the gap.
+
+The cascade + Stage 1 gate combination remains the right production choice.
+GNCAF + Stage 1 gate ensemble (v3.65 + gate) hits a TLS-FP rate of 41.5 %
+matching cascade, but its TLS Dice (0.27) is far below cascade's 0.61 —
+because the per-patch decoder lacks the spatial context Stage 2's
+RegionDecoder provides.
+
+---
+
 ## Lost-legacy numbers reconciliation (2026-05-11)
 
 User noted: lost `notebooks/gars_vs_gncaf.png` numbers (GARS 10.1 M:

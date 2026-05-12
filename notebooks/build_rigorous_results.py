@@ -103,6 +103,7 @@ def load_gncaf_rows(label_prefix: str, fold: int = 0) -> pd.DataFrame:
             obj = json.loads(p.read_text())
             for r in obj.get("per_slide", []):
                 r = dict(r)
+                r["fold"] = fold
                 # Promote union if present (apples-to-apples)
                 if "tls_dice_grid_union" in r:
                     r["tls_dice_grid"] = r["tls_dice_grid_union"]
@@ -111,6 +112,18 @@ def load_gncaf_rows(label_prefix: str, fold: int = 0) -> pd.DataFrame:
         if rows:
             break
     return pd.DataFrame(rows)
+
+
+def load_gncaf_rows_multi_fold(label_prefix: str, folds: list[int]) -> pd.DataFrame:
+    """Pool per-slide rows across multiple folds (for 5-fold aggregation)."""
+    all_rows = []
+    for fold in folds:
+        df = load_gncaf_rows(label_prefix, fold=fold)
+        if not df.empty:
+            all_rows.append(df)
+    if not all_rows:
+        return pd.DataFrame()
+    return pd.concat(all_rows, ignore_index=True)
 
 
 def load_cascade_rows(label_prefix: str, fold: int = 0, threshold: str = "0.5") -> pd.DataFrame:
@@ -322,9 +335,9 @@ def build_registry():
         ("GNCAF v3.58",
          lambda: load_gncaf_rows("v3.58_union", fold=0),
          "gars_gncaf_eval_v3.58_union_fullcohort_fold0_*"),
-        ("GNCAF v3.62 (paper-strict)",
-         lambda: load_gncaf_rows("v3.62_union", fold=0),
-         "gars_gncaf_eval_v3.62_union_fullcohort_fold0_*"),
+        ("GNCAF v3.62 (paper-strict, 5-fold)",
+         lambda: load_gncaf_rows_multi_fold("v3.62_union", folds=[0, 1, 2, 3, 4]),
+         "gars_gncaf_eval_v3.62_union_fullcohort_fold*_*"),
         ("GNCAF v3.63 (dual-σ, heavy)",
          lambda: load_gncaf_rows("v3.63", fold=0),
          "gars_gncaf_eval_v3.63_fullcohort_fold0_*"),
