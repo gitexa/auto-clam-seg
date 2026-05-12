@@ -311,33 +311,48 @@ def compute_all_metrics(df: pd.DataFrame, arch_name: str) -> dict:
 
 
 def build_registry():
+    """Each entry: (display_name, loader, [src_glob_for_experiment_dir]).
+    The src_glob is the pattern used to identify the eval output dir(s) so
+    we can also write the per-arch rigorous JSON inside the experiment dir.
+    """
     return [
         ("Cascade v3.37",
-         lambda: load_cascade_rows("cascade_union_fullcohort", fold=0)),
+         lambda: load_cascade_rows("cascade_union_fullcohort", fold=0),
+         "gars_cascade_cascade_union_fullcohort_fold0_*"),
         ("GNCAF v3.58",
-         lambda: load_gncaf_rows("v3.58_union", fold=0)),
+         lambda: load_gncaf_rows("v3.58_union", fold=0),
+         "gars_gncaf_eval_v3.58_union_fullcohort_fold0_*"),
         ("GNCAF v3.62 (paper-strict)",
-         lambda: load_gncaf_rows("v3.62_union", fold=0)),
+         lambda: load_gncaf_rows("v3.62_union", fold=0),
+         "gars_gncaf_eval_v3.62_union_fullcohort_fold0_*"),
         ("GNCAF v3.63 (dual-σ, heavy)",
-         lambda: load_gncaf_rows("v3.63", fold=0)),
+         lambda: load_gncaf_rows("v3.63", fold=0),
+         "gars_gncaf_eval_v3.63_fullcohort_fold0_*"),
         ("GNCAF v3.65 (dual-σ, simple)",
-         lambda: load_gncaf_rows("v3.65", fold=0)),
+         lambda: load_gncaf_rows("v3.65", fold=0),
+         "gars_gncaf_eval_v3.65_fullcohort_fold0_*"),
         ("GNCAF v3.65 + Stage 1 gate",
-         lambda: load_gncaf_rows("v3.65_gated", fold=0)),
+         lambda: load_gncaf_rows("v3.65_gated", fold=0),
+         "gars_gncaf_eval_v3.65_gated_fullcohort_fold0_*"),
         ("seg_v2.0 (tls_only)",
-         lambda: load_gncaf_rows("seg_v2", fold=0)),
+         lambda: load_gncaf_rows("seg_v2", fold=0),
+         "gars_gncaf_eval_seg_v2_fullcohort_fold0_*"),
         ("seg_v2.0 (dual)",
-         lambda: load_gncaf_rows("seg_v2_dual", fold=0)),
+         lambda: load_gncaf_rows("seg_v2_dual", fold=0),
+         "gars_gncaf_eval_seg_v2_dual_fullcohort_fold0_*"),
         ("seg_v2.0 (dual) + Stage 1 gate",
-         lambda: load_gncaf_rows("seg_v2_dual_gated", fold=0)),
+         lambda: load_gncaf_rows("seg_v2_dual_gated", fold=0),
+         "gars_gncaf_eval_seg_v2_dual_gated_fullcohort_fold0_*"),
         ("Cascade v3.38 (dual-σ Stage 2)",
-         lambda: load_cascade_rows("cascade_v3.38_fullcohort", fold=0)),
+         lambda: load_cascade_rows("cascade_v3.38_fullcohort", fold=0),
+         "gars_cascade_cascade_v3.38_fullcohort_fold0_*"),
     ]
 
 
 def main():
     summary = {}
-    for arch_name, loader in build_registry():
+    mirror_paths = []  # for verbose reporting
+    for arch_name, loader, src_glob in build_registry():
         df = loader()
         if df.empty:
             print(f"  {arch_name}: no rows; skip")
@@ -346,13 +361,28 @@ def main():
               f"({int((~df['gt_negative']).sum())} pos / "
               f"{int(df['gt_negative'].sum())} neg)")
         res = compute_all_metrics(df, arch_name)
-        # Save per-arch JSON
-        out_path = OUT / f"{slug(arch_name)}.json"
-        out_path.write_text(json.dumps(res, indent=2, default=str))
+        json_blob = json.dumps(res, indent=2, default=str)
+        # Save per-arch JSON in notebooks/architectures/rigorous_results/
+        (OUT / f"{slug(arch_name)}.json").write_text(json_blob)
+        # ALSO mirror into the corresponding experiment dir(s) so the
+        # rigorous results are discoverable alongside the raw per-slide
+        # JSONs they were aggregated from.
+        for exp_dir in sorted(EXP.glob(src_glob)):
+            if exp_dir.is_dir():
+                (exp_dir / "rigorous_metrics.json").write_text(json_blob)
+                mirror_paths.append(str(exp_dir / "rigorous_metrics.json"))
         summary[arch_name] = res
     # Combined summary JSON
     (OUT / "_summary.json").write_text(json.dumps(summary, indent=2, default=str))
     print(f"\nSaved per-arch JSONs and _summary.json to {OUT}")
+    # Also save a top-level rigorous-eval rollup to the experiments root
+    # so it's findable next to all the eval output dirs.
+    top_summary = EXP / "rigorous_eval_summary.json"
+    top_summary.write_text(json.dumps(summary, indent=2, default=str))
+    print(f"Saved top-level rollup to {top_summary}")
+    print(f"Mirrored per-arch rigorous_metrics.json into {len(mirror_paths)} experiment dirs:")
+    for p in mirror_paths:
+        print(f"  {p}")
 
     # ─── Markdown headline table ───────────────────────────────────────
     md_lines = ["# Rigorous evaluation summary — fold-0 fullcohort\n"]
