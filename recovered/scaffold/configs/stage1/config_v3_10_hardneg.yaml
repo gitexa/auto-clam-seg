@@ -1,0 +1,45 @@
+defaults:
+  - model: gatv2_5hop
+  - train: stage1
+  - _self_
+
+stage: stage1
+label: v3.10_hardneg_only_fold0
+seed: 42
+out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
+use_local_ssd: auto
+
+# v3.10 = Strategy 1b. Same as v3.9 but the aux CSV is filtered to ONLY
+# fp_s2_fired patches (12,522 confidently-wrong negatives). No positive
+# aux signal — avoids the "pull toward easy patches" failure mode of v3.9.
+train:
+  lr: 1.0e-4                   # fine-tune LR
+  weight_decay: 1.0e-4
+  epochs: 20
+  patience: 8
+  pos_weight: 5.0
+  upsample_factor: 4
+  patch_size: 256
+  k_folds: 5
+  fold_idx: 0
+  data_fraction: 1.0
+  num_workers: 4
+  prefetch_factor: 2
+  persistent_workers: true
+
+  init_from_ckpt: /home/ubuntu/ahaas-persistent-std-tcga/experiments/gars_stage1_v3.8_gatv2_5hop_20260501_043445/best_checkpoint.pt
+  aux_label_csv: /home/ubuntu/auto-clam-seg/recovered/scaffold/stage2_disagreement_labels_for_fold0_hardneg_only.csv
+  aux_loss_weight: 0.3         # gentler than v3.9 (was 0.5)
+
+wandb:
+  enabled: true
+  project: tls-pixel-seg
+  entity: null
+  mode: ${oc.env:WANDB_MODE,online}
+  tags: [v3, gars, stage1, aux_loss, strategy_1b, hardneg_only, finetune]
+
+hydra:
+  run:
+    dir: ${out_root}/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+  job:
+    chdir: false

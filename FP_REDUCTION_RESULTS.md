@@ -205,6 +205,66 @@ multi-scale Stage 1 to see broader context. Both orthogonal to aux loss.
 **v3.7 (v3.8 Stage 1 + v3.37 Stage 2 + post-proc min_size=2, closing=1)**
 remains the production deployment. mDice 0.717, TLS-FP 31.7%, GC-FP 4.9%.
 
+## Strategy 1b (v3.10) — hard-negative-only aux loss — MIXED / NEGATIVE on primary
+
+After Strategy 1 (pos+neg aux) and Strategy 2 (Stage 2 retrain) both
+degraded the cascade, tried a *cleaner* variant: filter the aux-label CSV
+to keep ONLY the 12,522 `fp_s2_fired` rows (no positive aux signal).
+Same training driver, `aux_loss_weight=0.3`.
+
+### Result on fold-0 fullcohort (165 slides)
+
+| Metric              | v3.7 baseline | v3.10 thr=0.5 | v3.10 thr=0.7 |
+|---------------------|---------------|---------------|---------------|
+| patch-grid mDice    | 0.737         | **0.667** (−0.07) | 0.641 (−0.10) |
+| patch-grid TLS      | 0.613         | **0.476** (−0.14) | 0.432 (−0.18) |
+| patch-grid GC       | 0.861         | 0.858         | 0.849         |
+| **pixel-agg mDice** | 0.832         | **0.896** (+0.06) | **0.906** (+0.07) |
+| pixel-agg TLS       | 0.816         | 0.900 (+0.08) | 0.911 (+0.10) |
+| pixel-agg GC        | 0.849         | 0.893 (+0.04) | 0.901 (+0.05) |
+| sel% (patches fired)| 0.5 %         | 0.21 %        | 0.15 %        |
+| Stage 1 own F1      | ~0.56         | 0.49          | 0.49          |
+
+### Interpretation
+
+Stage 1 shifted toward **higher precision / lower recall** — fires on
+~58% fewer patches but the predictions it does make are tighter and
+better aligned with GT. Per-patch averaging penalises the missed
+patches; pixel-aggregate pooling rewards the high per-firing quality.
+
+### Verdict: NEGATIVE on primary patch-grid metric
+
+By the production metric (patch-grid mDice 5-fold), v3.10 is worse than
+v3.7. Stage 1's own F1 also drops (0.56 → 0.49). The hard-neg-only aux
+signal pushes Stage 1 to be over-conservative — it suppresses real
+positives along with the FP-fired patches.
+
+### What v3.10 IS useful for
+
+A **high-precision deployment variant**: at thr=0.5, pixel-agg
+TLS Dice 0.90 / mDice 0.90 means almost every predicted pixel is correct.
+Useful when downstream cost of false-positive pixels dominates (e.g.,
+auto-flagging for pathologist review where over-flagging is expensive).
+Not a replacement for v3.7 on the standard benchmark.
+
+### Aux-loss family — final summary
+
+| Variant | aux loss | Stage 1 F1 | Cascade mDice (fold 0) | Verdict |
+|---------|---------|-----------|-----------------------|---------|
+| v3.8 (baseline) | — | 0.56 | 0.737 | reference |
+| v3.9 (Strategy 1, pos+neg, w=0.5) | both | 0.66 | 0.688 | neg |
+| v3.46 (Strategy 2, + Stage 2 retrain) | both | — | 0.628 | strong neg |
+| **v3.10 (Strategy 1b, neg-only, w=0.3)** | neg only | **0.49** | **0.667** | neg (patch-grid) / pos (pixel-agg) |
+
+The aux signal IS a tuning knob along the precision/recall axis:
+- positives only → pull toward easy/positive patches (would over-fire)
+- negatives only → pull toward conservative/precise (under-fires)
+- mixed → some of each
+
+NONE OF THE THREE beats v3.7 on the patch-grid metric. The HookNet
+labels' BCE loss is already near-optimal for the cascade's primary
+metric. Aux-loss only changes the operating point.
+
 ## Strategy D — GT cleanup (cohort cross-check, 2026-05-13) — REJECTED
 
 Cross-checked HookNet GT-negative slides against `df_summary_v10.csv`'s
