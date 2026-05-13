@@ -12,27 +12,26 @@ GPU is now idle. Queued experiments below, ranked by expected value. None
 launched autonomously — each has either compute cost ≥10h or
 implementation risk that warrants user direction.
 
-## 1. Multi-scale Stage 1 (bipartite 256+512 px) — HIGHEST EV
+## ~~1. Multi-scale Stage 1 (bipartite 256+512 px)~~ — already run as v3.60, STRONGLY NEGATIVE (2026-05-13)
 
-**Hypothesis**: Stage 1's failures (LUSC TLS at 0.529 ± 0.024) come from
-narrow context. A bipartite graph between 256-px nodes and their parent
-512-px tiles gives Stage 1 broader morphological context.
+Infrastructure exists (`multiscale_stage1_model.py`, `multiscale_dataset.py`,
+`train_gars_stage1_multiscale.py`). v3.60 was trained on May 7 with the
+multi-scale Stage 1 (zero-init scale embed + GATv2-5hop over bipartite
+graph) + paired Stage 2 retrain. Original eval (May 7) used old
+post-proc; re-evaluated 2026-05-13 with production post-proc.
 
-**Architecture** (per user preference for bipartite/multi-scale):
-- Two node sets: 256-px nodes (current) + 512-px parent nodes (4 children
-  per parent at most).
-- Bipartite edges: each 256-node ↔ its parent 512-node.
-- 512-px features (1536-d UNI v2, on disk at
-  `/home/ubuntu/ahaas-persistent-std-tcga/data/tcga-{blca,kirc,lusc}/representations_tif_trident/20x_512px_0px_overlap/features_uni_v2_grandqc_zarr/`).
-- One bipartite GAT pass propagates 512→256 once before the existing
-  GATv2-5hop runs on the 256 graph.
+Fold-0 result vs v3.7 baseline:
 
-**Cost**: ~3-4h impl (bipartite layer + dataset cache for parent lookup) +
-~2h fold-0 Stage 1 train + ~3h fold-0 Stage 2 retrain + ~10 min eval =
-**~10h total**.
+- patch-grid mDice 0.682 (vs 0.737, **−0.055**)
+- patch-grid GC   0.771 (vs 0.861, **−0.090**)
+- pixel-agg mDice 0.610 (vs 0.832, **−0.222**)
+- pixel-agg GC    0.479 (vs 0.849, **−0.370**)
 
-**Decision criterion**: Cascade fold-0 mDice > 0.737 (current fold-0
-baseline). If yes → green-light 5-fold CV (~30h additional).
+Strongly negative. The bipartite information channel does not help and
+appears to confuse the cascade's GC discrimination. ALL architectural
+end2end variants tested are negative on patch-grid.
+
+V3.7 single-scale cascade is genuinely the champion.
 
 ## ~~2. Hard-negative-only Stage 1 fine-tune~~ — RUN, NEGATIVE on primary (2026-05-13)
 
@@ -76,15 +75,24 @@ Domain-expert task, not a model change.
 
 ## Recommended path
 
-1. If user has ~10h GPU budget: **Multi-scale Stage 1 (1)** — best
-   alignment with stated arch preferences. Strongest remaining
-   hypothesis.
-2. If user wants quick wins: **TTA (3)** — defensive, ~2.5h, likely
-   gives +0.5 mDice for free.
+**All autonomously-testable hypotheses now exhausted (2026-05-13 sprint):**
 
-Aux-loss family fully buried (Strategies 1, 1b, 2 all negative on
-patch-grid). End2end research direction closed; only architectural
-changes remain.
+- Aux-loss family (Strategies 1, 1b, 2): all negative on patch-grid
+- TTA 2x: neutral
+- Multi-scale Stage 1 (v3.60 re-evaluated with prod post-proc): **strongly negative**
+- GT cleanup vs cohort metadata: rejected
+
+The remaining unexplored ideas need user direction:
+
+- **Pathologist re-annotation** of the 13 confidently-FP slides per
+  fold. Only path to push TLS-FP below 31.7%. Domain-expert task.
+- **Higher-resolution Stage 2** (input at 512 px instead of 256 px
+  upsampled). Major surgery: tile-clustering logic, dataset rewrite.
+  ~10h GPU + impl risk.
+- **Stage 1 architectural rethink**: prior attempts (v3.60 bipartite,
+  v3.38 dual-sigmoid Stage 2) all failed. Would need a genuinely new
+  idea, not a variation on existing ones.
 
 Production v3.7 cascade is shippable as-is. v3.10 is a derived
-**high-precision variant** for pre-screen deployment.
+**high-precision variant** for pre-screen deployment. End2end and
+multi-scale research directions both closed.

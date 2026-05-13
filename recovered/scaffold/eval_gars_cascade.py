@@ -335,7 +335,8 @@ def _stage2_forward_tta(stage2_region, b_rgb, b_uni, b_gat, b_val, tta: str):
     tta='2x'  -> identity + horizontal flip, averaged on logit scale.
     """
     logits1 = stage2_region(b_rgb, b_uni, b_gat, b_val)
-    if tta == "off":
+    # Accept "off" / "false" / False / None as disabled, "2x" as enabled.
+    if tta in ("off", "false", "False", False, None, 0):
         return logits1
     if tta == "2x":
         perm = _HFLIP_CELL_PERM
