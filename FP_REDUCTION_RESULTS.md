@@ -205,13 +205,42 @@ multi-scale Stage 1 to see broader context. Both orthogonal to aux loss.
 **v3.7 (v3.8 Stage 1 + v3.37 Stage 2 + post-proc min_size=2, closing=1)**
 remains the production deployment. mDice 0.717, TLS-FP 31.7%, GC-FP 4.9%.
 
-## Strategy D — GT cleanup (out of scope, future work)
+## Strategy D — GT cleanup (cohort cross-check, 2026-05-13) — REJECTED
 
-The 13 residual FP slides should be manually inspected. If they're real
-TLS-positive with under-annotation by HookNet, the cohort metadata can be
-updated (move from "negative" → "positive"), which would drop the FP rate
-without any model change. Cross-checking with `df_summary_v10.csv`'s
-`tls_present` field is a starting point.
+Cross-checked HookNet GT-negative slides against `df_summary_v10.csv`'s
+`tls_present` field across all 5 folds:
+
+| Fold | gt_neg (HookNet) | of which cohort `tls_present=True` |
+|------|------------------|------------------------------------|
+| 0    | 42               | **0**                              |
+| 1    | 40               | **0**                              |
+| 2    | 42               | **0**                              |
+| 3    | 40               | **0**                              |
+| 4    | 45               | **0**                              |
+
+**0/209 GT-negative slides across all folds have cohort `tls_present=True`.**
+
+The HookNet annotation and the cohort-level `tls_present` flag are derived
+from the same source — both agree that these slides are TLS-negative. The
+13 residual FP slides at the 31.7 % floor are **genuinely TLS-negative
+by both definitions** and the model fires on them anyway.
+
+### Implication
+
+The 31.7 % TLS-FP floor is NOT annotation-driven (no easy metadata fix).
+Two real possibilities:
+
+1. **Biological noise floor** — the model detects lymphoid aggregates or
+   tertiary lymphoid structures that don't meet the formal TLS criteria
+   (size, organisation, germinal center development) but have similar
+   morphological signatures. Reducing this further would require
+   stricter biological criteria in the model.
+2. **Annotation noise upstream** — both HookNet and cohort metadata
+   inherited the same noise. Resolution would require pathologist
+   re-annotation of the 13 confidently-FP slides per fold.
+
+Neither path is cheap. Production deployment ships at 31.7 % TLS-FP as
+the honest floor.
 
 ## Bottom line
 
