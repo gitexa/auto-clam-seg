@@ -34,20 +34,20 @@ narrow context. A bipartite graph between 256-px nodes and their parent
 **Decision criterion**: Cascade fold-0 mDice > 0.737 (current fold-0
 baseline). If yes → green-light 5-fold CV (~30h additional).
 
-## 2. Hard-negative-only Stage 1 fine-tune — MEDIUM EV
+## ~~2. Hard-negative-only Stage 1 fine-tune~~ — RUN, NEGATIVE on primary (2026-05-13)
 
-**Hypothesis**: A *cleaner* version of Strategy 1 — push Stage 1 logits
-DOWN on the 12,522 `fp_s2_fired` patches (no positive aux signal).
-Avoids the "easy patches" pull mode that doomed v3.9.
+**v3.10**: trained with aux loss on only the 12,522 fp_s2_fired patches
+(no positive aux), `aux_loss_weight=0.3`. Result on fold 0:
 
-**Concern**: 31.7% TLS-FP floor is annotation noise — pushing Stage 1
-down on real lymphoid structures the cohort calls "TLS-negative" may
-just teach Stage 1 to suppress real positives.
+- patch-grid mDice 0.667 (vs 0.737 baseline, −0.07)
+- pixel-agg mDice 0.896 (vs 0.832, +0.06)
+- Stage 1 fires on 58% fewer patches (sel% 0.5 → 0.21)
+- Stage 1 own F1 dropped to 0.49 (vs ~0.56 baseline)
 
-**Cost**: ~3h Stage 1 fine-tune + 10 min eval = ~3h. Use existing
-`stage2_disagreement_labels_for_fold0.csv`, filter to
-`reason='fp_s2_fired'` only, set `aux_loss_weight=0.3`. Single fold-0
-proof-of-concept.
+Pushes Stage 1 toward higher precision / lower recall — useful as a
+**high-precision pre-screen variant** but doesn't beat v3.7 on the
+primary patch-grid metric. Aux-loss family fully closed (no remaining
+variants to try). See `FP_REDUCTION_RESULTS.md` Strategy 1b section.
 
 ## 3. Stage 2 TTA (test-time augmentation) — LOW EV but CHEAPEST
 
@@ -77,10 +77,14 @@ Domain-expert task, not a model change.
 ## Recommended path
 
 1. If user has ~10h GPU budget: **Multi-scale Stage 1 (1)** — best
-   alignment with stated arch preferences.
+   alignment with stated arch preferences. Strongest remaining
+   hypothesis.
 2. If user wants quick wins: **TTA (3)** — defensive, ~2.5h, likely
    gives +0.5 mDice for free.
-3. If user wants to fully bury aux-loss family: **Hard-neg-only (2)** —
-   ~3h to confirm negative.
 
-Production v3.7 cascade is shippable as-is.
+Aux-loss family fully buried (Strategies 1, 1b, 2 all negative on
+patch-grid). End2end research direction closed; only architectural
+changes remain.
+
+Production v3.7 cascade is shippable as-is. v3.10 is a derived
+**high-precision variant** for pre-screen deployment.
