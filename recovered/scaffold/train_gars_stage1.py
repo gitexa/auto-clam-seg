@@ -165,14 +165,17 @@ def make_slide_loader(dataset, num_workers: int, prefetch_factor: int,
 
 
 def run_split(model, loader, optimizer, criterion, device, train: bool,
-              upsample_factor: int, patch_size: int):
+              upsample_factor: int, patch_size: int,
+              aux_lookup: dict | None = None, aux_loss_weight: float = 0.0):
     if train:
         model.train()
     else:
         model.eval()
     total_loss = 0.0
+    total_aux_loss = 0.0
     tp = fp = fn = tn = 0
     n_batches = 0
+    n_aux_patches_total = 0
     ctx = torch.enable_grad() if train else torch.no_grad()
     with ctx:
         for batch in loader:
@@ -185,6 +188,32 @@ def run_split(model, loader, optimizer, criterion, device, train: bool,
             ).to(device, non_blocking=True)
             logits = model(features, edge_index)
             loss = criterion(logits, target)
+
+            # Auxiliary loss: for each patch in this slide that has a
+            # "Stage 2 disagreement" label (Strategy 1), apply BCE with
+            # that label. Aux labels can override the HookNet binary
+            # label since they represent "did Stage 2 successfully
+            # segment this patch" — a stronger downstream signal.
+            aux_loss = None
+            if aux_lookup is not None and aux_loss_weight > 0:
+                short_id = batch.get("slide_id", "").split(".")[0]
+                aux_for_slide = aux_lookup.get(short_id)
+                if aux_for_slide:
+                    n_patches = logits.shape[0]
+                    aux_mask = torch.zeros(n_patches, dtype=torch.bool, device=device)
+                    aux_label = torch.zeros(n_patches, dtype=torch.float32, device=device)
+                    for pi, lab in aux_for_slide.items():
+                        if 0 <= pi < n_patches:
+                            aux_mask[pi] = True
+                            aux_label[pi] = float(lab)
+                    n_aux = int(aux_mask.sum().item())
+                    if n_aux > 0:
+                        aux_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                            logits[aux_mask], aux_label[aux_mask], reduction="mean",
+                        )
+                        loss = loss + aux_loss_weight * aux_loss
+                        n_aux_patches_total += n_aux
+                        total_aux_loss += float(aux_loss.detach()) * n_aux
             if train:
                 optimizer.zero_grad()
                 loss.backward()
@@ -196,6 +225,8 @@ def run_split(model, loader, optimizer, criterion, device, train: bool,
     rec, prec, f1 = f1_from_confusion(tp, fp, fn, tn)
     return {
         "loss": total_loss / max(1, n_batches),
+        "aux_loss": (total_aux_loss / max(1, n_aux_patches_total)) if n_aux_patches_total else 0.0,
+        "n_aux_patches": n_aux_patches_total,
         "recall": rec, "precision": prec, "f1": f1,
         "tp": tp, "fp": fp, "fn": fn, "tn": tn,
         "n_selected": tp + fp,
@@ -294,9 +325,34 @@ def main(cfg: DictConfig) -> None:
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Stage 1 ({cfg.model.gnn_type} {cfg.model.n_hops}-hop): {n_params:,} params")
 
+    # Resume from a previous Stage 1 ckpt (fine-tune path).
+    init_ckpt = cfg.train.get("init_from_ckpt", None)
+    if init_ckpt:
+        print(f"Loading weights from {init_ckpt}")
+        obj = torch.load(init_ckpt, map_location="cpu", weights_only=False)
+        missing, unexpected = model.load_state_dict(obj["model_state_dict"], strict=False)
+        print(f"  missing keys: {len(missing)}, unexpected: {len(unexpected)}")
+
     optimizer = AdamW(model.parameters(), lr=cfg.train.lr, weight_decay=cfg.train.weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=cfg.train.epochs, eta_min=0.0)
     criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(cfg.train.pos_weight, device=device))
+
+    # Strategy 1 (auxiliary "Stage 2 disagrees" labels).
+    aux_lookup = None
+    aux_loss_weight = float(cfg.train.get("aux_loss_weight", 0.0))
+    aux_csv = cfg.train.get("aux_label_csv", None)
+    if aux_csv and aux_loss_weight > 0:
+        import csv as _csv
+        aux_lookup = {}
+        with open(aux_csv) as fh:
+            r = _csv.DictReader(fh)
+            for row in r:
+                aux_lookup.setdefault(row["slide_id"], {})[int(row["patch_idx"])] = int(row["label"])
+        n_total = sum(len(v) for v in aux_lookup.values())
+        n_pos = sum(sum(1 for lab in v.values() if lab == 1) for v in aux_lookup.values())
+        n_neg = n_total - n_pos
+        print(f"Loaded aux labels: {n_total} patches across {len(aux_lookup)} slides "
+              f"(pos={n_pos}, neg={n_neg}); aux_loss_weight={aux_loss_weight}")
 
     # ─ Wandb ─
     run = None
@@ -321,7 +377,8 @@ def main(cfg: DictConfig) -> None:
     for epoch in range(1, cfg.train.epochs + 1):
         t0 = time.time()
         tr = run_split(model, train_loader, optimizer, criterion, device, train=True,
-                       upsample_factor=cfg.train.upsample_factor, patch_size=cfg.train.patch_size)
+                       upsample_factor=cfg.train.upsample_factor, patch_size=cfg.train.patch_size,
+                       aux_lookup=aux_lookup, aux_loss_weight=aux_loss_weight)
         train_t = time.time() - t0
         t0 = time.time()
         va = run_split(model, val_loader, optimizer, criterion, device, train=False,

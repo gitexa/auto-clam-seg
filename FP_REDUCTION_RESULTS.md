@@ -73,6 +73,74 @@ the TLS-positive slides but won't push the slide-level FP rate below 32 %.
 
 **Skipped to save 4× inference compute.**
 
+## Strategy E (Plan v2) — Stage 1 fine-tune with Stage 2 disagreement labels — NEGATIVE
+
+User asked for end-to-end cascade training strategies. Plan proposed three:
+Strategy 1 (aux loss with Stage 2 success labels), Strategy 2 (iterative EM),
+Strategy 3 (Gumbel-topK). Ran Strategy 1 (cheapest).
+
+### Pipeline
+
+1. `build_stage2_disagreement_labels.py` — sweeps fold-0 training set with
+   frozen v3.7 cascade (Stage 1 v3.8 + Stage 2 v3.37). For each
+   Stage-1-selected patch, computes per-tile TLS/GC Dice against the
+   HookNet GT and assigns a label:
+   - `1` (confirmed) — Stage 2 successfully segments the patch (Dice ≥ 0.5).
+   - `0` (Stage 2 disagrees) — Stage 2 produces low/no TLS on a HookNet-
+     positive patch, OR Stage 1 fired on a GT-negative patch.
+2. `train_gars_stage1.py:run_split` extended with `aux_loss_weight` knob.
+   Total loss = `BCE(HookNet binary labels) + aux_w · BCE(aux labels)`
+   on Stage-1-selected patches.
+3. `config_v3_9_aux.yaml`: load from v3.8 ckpt; lr=1e-4; 20 epochs;
+   `aux_loss_weight=0.5`; `aux_label_csv=stage2_disagreement_labels_for_fold0.csv`.
+
+### Labels collected
+
+- 52,638 patches across 515 training slides (folds 1-4 ∪)
+- Positive (confirmed): 34,538 (65.6 %)
+- Negative breakdown:
+  - `fp_s2_fired` (Stage 2 fires on GT-neg patch): 12,522
+  - `fp_s2_empty` (Stage 1 wasted attention; Stage 2 self-corrected): 5,550
+  - `missed` (Stage 2 fails on GT-positive): 28
+
+### Stage 1 training-time result
+
+v3.9 reaches **F1 = 0.660 at epoch 5** (early-stopped at epoch 13).
+Baseline v3.8 F1 was ~0.561. **Stage 1's own metric improved by +0.10**.
+
+### Cascade fold-0 fullcohort result (v3.9 Stage 1 + v3.37 Stage 2)
+
+| Config | TLS Dice | GC Dice | mDice | TLS-FP |
+|---|---|---|---|---|
+| v3.8 baseline (thr=0.5, min=2, c=1) | 0.604 | 0.831 | **0.717** | 31.7 % |
+| **v3.9** (thr=0.5, min=2, c=1) | 0.569 | 0.807 | 0.688 | 31.7 % |
+| v3.9 thr=0.7 | 0.531 | 0.798 | 0.664 | 24.4 % |
+
+### Verdict: NEGATIVE for Strategy 1 alone
+
+Despite Stage 1 F1 climbing from 0.56 → 0.66, cascade mDice **dropped** by 0.029
+and TLS-FP stayed at 31.7 %. The mechanism is straightforward:
+
+* v3.9's improved Stage 1 selects a slightly DIFFERENT patch distribution
+  (the aux loss pushed it away from "Stage 2 will disagree" patches).
+* But Stage 2 (v3.37) was trained on v3.8's patch distribution. It
+  doesn't generalize as well to v3.9's selections.
+* Net cascade mDice slightly degrades.
+
+### Implication for Strategy 2
+
+Strategy 1's premise — **"better Stage 1 alone → better cascade"** — is
+false. The two-stage cascade is a coupled system: Stage 2 expects the patch
+distribution Stage 1 produces. To get the win, **must also retrain Stage 2**
+on v3.9's selections. That is **Strategy 2 (iterative EM)**.
+
+Strategy 2 estimated cost: ~6 h (Stage 2 retrain on v3.9's patches) per
+round; 2 rounds = ~12 h. Still substantially cheaper than Stage 3 (full
+Gumbel-topK joint training, ~10 h plus implementation risk).
+
+v3.9 Stage 1 ckpt is preserved for Strategy 2 use:
+`/home/ubuntu/ahaas-persistent-std-tcga/experiments/gars_stage1_v3.9_aux_finetune_fold0_20260512_224433/best_checkpoint.pt`
+
 ## Strategy D — GT cleanup (out of scope, future work)
 
 The 13 residual FP slides should be manually inspected. If they're real
