@@ -141,6 +141,70 @@ Gumbel-topK joint training, ~10 h plus implementation risk).
 v3.9 Stage 1 ckpt is preserved for Strategy 2 use:
 `/home/ubuntu/ahaas-persistent-std-tcga/experiments/gars_stage1_v3.9_aux_finetune_fold0_20260512_224433/best_checkpoint.pt`
 
+## Strategy 2 round 1 — v3.46 Stage 2 retrain on v3.9 selections — STRONG NEGATIVE
+
+Retrained Stage 2 (RegionDecoder, same v3.37 architecture) on v3.9 Stage 1's
+patch selections. Same `tls_patch_dataset_min4096.pt` cache. Training:
+early-stopped at epoch 14 (best epoch 6, val_mDice=0.849 on patches).
+
+### Cascade fold-0 fullcohort result (v3.9 Stage 1 + v3.46 Stage 2)
+
+| thr | patch-grid mDice | TLS | GC |
+|---|---|---|---|
+| 0.30 | 0.625 | 0.574 | 0.677 |
+| 0.40 | 0.624 | 0.571 | 0.676 |
+| **0.50** | **0.628** | 0.568 | 0.687 |
+| 0.60 | 0.634 (best) | 0.567 | 0.702 |
+| 0.70 | 0.632 | 0.567 | 0.697 |
+
+vs v3.7 baseline (v3.8 Stage 1 + v3.37 Stage 2) thr=0.5:
+mDice **0.717 → 0.628** (−0.089), TLS 0.604 → 0.568 (−0.036),
+GC **0.831 → 0.687** (−0.144).
+
+vs v3.9 (v3.9 Stage 1 + v3.37 Stage 2) thr=0.5:
+mDice 0.688 → 0.628 (−0.060), GC 0.807 → 0.687 (−0.120).
+
+### Verdict: STRONG NEGATIVE
+
+The cascade got **worse**, not better, after retraining Stage 2 on v3.9's
+selections. GC took the hardest hit (−0.144).
+
+### Root cause: aux signal pushes toward EASY patches
+
+Both Strategy 1 (v3.9 Stage 1 alone) and Strategy 2 (v3.9 + retrained
+Stage 2) degrade the cascade. The mechanism is the aux signal itself:
+
+- "Stage 2 succeeded on this patch" labels mark patches where v3.37 already
+  segments well — which are mostly EASY patches (clean, large, well-formed
+  TLS/GC structures).
+- Fine-tuning Stage 1 toward these labels biases selection toward easy patches
+  and AWAY from the hard-but-informative ones.
+- When Stage 2 is retrained on the easy-biased selection, it loses
+  discrimination on the harder cases — especially GC (which requires
+  fine-grained discrimination from surrounding TLS, abundant in hard patches).
+- Result: v3.46 Stage 2 has high val_mDice on training patches (0.849) but
+  the patch distribution doesn't generalise to full-slide eval (0.628).
+
+### Implication for Strategy 3
+
+Strategy 3 (Gumbel-topK joint training) would propagate the SAME misaligned
+signal — Stage 2 pixel loss only exists on Stage-1-SELECTED patches, so
+the gradient still rewards "select easy patches" over "select informative
+patches". Skipping Strategy 3.
+
+### Family conclusion: aux-loss-on-Stage-1 is misaligned
+
+The fundamental problem: Stage 2's pixel-Dice is a *result* of patch
+difficulty, not a signal for patch *informativeness*. To genuinely improve
+the cascade end-to-end, would need a different supervision target — e.g.
+hard-negative mining on FP-confidently-fires-on-empty patches, or
+multi-scale Stage 1 to see broader context. Both orthogonal to aux loss.
+
+### Production champion stands
+
+**v3.7 (v3.8 Stage 1 + v3.37 Stage 2 + post-proc min_size=2, closing=1)**
+remains the production deployment. mDice 0.717, TLS-FP 31.7%, GC-FP 4.9%.
+
 ## Strategy D — GT cleanup (out of scope, future work)
 
 The 13 residual FP slides should be manually inspected. If they're real

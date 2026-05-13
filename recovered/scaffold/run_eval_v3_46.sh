@@ -15,7 +15,7 @@ log "Waiting for v3.46 training to produce best_checkpoint.pt"
 log "  v3.9 stage1 = $V9_CKPT"
 log "  v3.46 dir   = $V46_DIR"
 
-until [ -s "$V46_DIR/best_checkpoint.pt" ] && ! pgrep -f "label=v3.46_em_round1_on_v3.9" >/dev/null 2>&1; do
+until [ -s "$V46_DIR/best_checkpoint.pt" ] && ! pgrep -f "config_v3_46_em_r1" >/dev/null 2>&1; do
   sleep 60
   # refresh dir in case timestamp shifted
   V46_DIR=$(ls -1dt $EXP/gars_region_v3.46_em_round1_on_v3.9_* 2>/dev/null | head -1)
