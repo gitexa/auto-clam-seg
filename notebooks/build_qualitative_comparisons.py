@@ -38,6 +38,7 @@ OUT.mkdir(parents=True, exist_ok=True)
 # Production ckpts per CHAMPION_MODEL_REGISTRY.md
 CKPT_STAGE1 = "/home/ubuntu/ahaas-persistent-std-tcga/experiments/gars_stage1_v3.8_gatv2_5hop_20260501_043445/best_checkpoint.pt"
 CKPT_CASC_S2 = "/home/ubuntu/ahaas-persistent-std-tcga/experiments/gars_region_v3.37_full_20260502_144124/best_checkpoint.pt"
+CKPT_STAGE1_V310 = "/home/ubuntu/ahaas-persistent-std-tcga/experiments/gars_stage1_v3.10_hardneg_only_fold0_20260513_041038/best_checkpoint.pt"
 CKPT_GNCAF = "/home/ubuntu/ahaas-persistent-std-tcga/experiments/gars_gncaf_v3.65_dual_sigmoid_simple_loss_20260511_011243/best_checkpoint.pt"
 CKPT_SEG_V2 = "/home/ubuntu/ahaas-persistent-std-tcga/experiments/seg_v2.0_dual_tls_gc_5fold_57e12399/fold_0/best_checkpoint.pt"
 
@@ -191,40 +192,127 @@ def colorise_grid(grid_class: np.ndarray) -> np.ndarray:
     return out
 
 
+def gt_instances(gt_grid: np.ndarray, margin: int = 2,
+                 max_instances: int = 6) -> list[tuple[int, int, int, int]]:
+    """Return up to `max_instances` bounding boxes around GT instances.
+
+    Instances = connected components of (gt_grid > 0). Each bbox is
+    (gy0, gx0, gy1, gx1) inclusive, expanded by `margin` grid cells
+    and clipped to grid bounds. Components sorted by size (largest first).
+    """
+    fg = (gt_grid > 0).astype(np.uint8)
+    if fg.sum() == 0:
+        return []
+    lbl, n = ndimage.label(fg)
+    if n == 0:
+        return []
+    bboxes = []
+    for k in range(1, n + 1):
+        mask_k = (lbl == k)
+        size = int(mask_k.sum())
+        ys, xs = np.where(mask_k)
+        gy0, gy1 = int(ys.min()), int(ys.max())
+        gx0, gx1 = int(xs.min()), int(xs.max())
+        # Expand by margin
+        gy0 = max(0, gy0 - margin); gx0 = max(0, gx0 - margin)
+        gy1 = min(gt_grid.shape[0] - 1, gy1 + margin)
+        gx1 = min(gt_grid.shape[1] - 1, gx1 + margin)
+        bboxes.append((size, gy0, gx0, gy1, gx1))
+    bboxes.sort(reverse=True, key=lambda t: t[0])
+    return [(gy0, gx0, gy1, gx1) for _, gy0, gx0, gy1, gx1 in bboxes[:max_instances]]
+
+
+def crop_grid(grid: np.ndarray, bbox: tuple[int, int, int, int]) -> np.ndarray:
+    gy0, gx0, gy1, gx1 = bbox
+    return grid[gy0:gy1 + 1, gx0:gx1 + 1]
+
+
+def crop_thumb(thumb: np.ndarray, bbox: tuple[int, int, int, int],
+               slide_h: int, slide_w: int) -> np.ndarray:
+    """Map a grid bbox (patch-cell coords, each = 256 px at level 0) to
+    thumbnail pixel coords and crop."""
+    h_t, w_t = thumb.shape[:2]
+    gy0, gx0, gy1, gx1 = bbox
+    y0 = int(gy0 * PATCH_SIZE / slide_h * h_t)
+    y1 = int((gy1 + 1) * PATCH_SIZE / slide_h * h_t)
+    x0 = int(gx0 * PATCH_SIZE / slide_w * w_t)
+    x1 = int((gx1 + 1) * PATCH_SIZE / slide_w * w_t)
+    return thumb[y0:y1, x0:x1]
+
+
 def render_panel(thumb_rgb: np.ndarray, grids: dict[str, np.ndarray],
                  slide_h_pix: int, slide_w_pix: int, slide_id: str,
                  cancer_type: str, out_path: Path):
-    """Render thumbnail + N model overlay panels side by side."""
-    titles = ["WSI thumbnail"] + list(grids.keys())
-    n = len(titles)
-    h_t, w_t = thumb_rgb.shape[:2]
-    fig, axes = plt.subplots(1, n, figsize=(3.2 * n, 3.5 * (h_t / w_t * (3.2 / 1.0))))
-    if n == 1:
-        axes = [axes]
+    """Render full-slide row + per-instance crop rows.
 
-    for ax in axes:
+    Row 0: WSI thumbnail | Ground truth | model_1 | model_2 | ...
+    Row 1..N: per-GT-instance crops in same column layout. If GT has
+    no instances (slide is TLS-negative), only the full-slide row is rendered.
+    """
+    gt_grid = grids["Ground truth"]
+    bboxes = gt_instances(gt_grid, margin=2, max_instances=6)
+    n_inst = len(bboxes)
+
+    titles = ["WSI thumbnail"] + list(grids.keys())
+    n_cols = len(titles)
+    n_rows = 1 + n_inst
+    h_t, w_t = thumb_rgb.shape[:2]
+
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(2.6 * n_cols, 2.6 * (h_t / w_t) * (1 + 0.7 * n_inst)),
+        squeeze=False,
+    )
+
+    # ── Row 0: full-slide ─────────────────────────────────────────
+    for c, ax in enumerate(axes[0]):
         ax.set_xticks([]); ax.set_yticks([])
         ax.imshow(thumb_rgb)
-
-    axes[0].set_title(f"{cancer_type} {slide_id}", fontsize=9)
-
+    axes[0, 0].set_title(f"{cancer_type} {slide_id}", fontsize=8)
     for i, (label, grid) in enumerate(grids.items(), start=1):
-        ax = axes[i]
+        ax = axes[0, i]
         overlay = colorise_grid(patch_grid_to_thumbnail(
             grid, (h_t, w_t), slide_h_pix, slide_w_pix
         ))
         ax.imshow(overlay)
-        # Add stats to title
         n_tls = int((grid == 1).sum())
         n_gc = int((grid == 2).sum())
-        ax.set_title(f"{label}\nTLS patches={n_tls}  GC patches={n_gc}", fontsize=9)
+        ax.set_title(f"{label}\nTLS={n_tls} GC={n_gc}", fontsize=8)
 
-    fig.suptitle(f"TLS (red) + GC (yellow) per-patch predictions — {cancer_type} {slide_id}",
-                 y=1.02, fontsize=11)
+    # ── Rows 1..N: per-GT-instance crops ─────────────────────────
+    for r, bbox in enumerate(bboxes, start=1):
+        thumb_crop = crop_thumb(thumb_rgb, bbox, slide_h_pix, slide_w_pix)
+        ch, cw = thumb_crop.shape[:2]
+
+        for c, ax in enumerate(axes[r]):
+            ax.set_xticks([]); ax.set_yticks([])
+            ax.imshow(thumb_crop)
+
+        gy0, gx0, gy1, gx1 = bbox
+        axes[r, 0].set_title(
+            f"Instance {r} crop\n(g[{gy0}:{gy1+1}, {gx0}:{gx1+1}])", fontsize=8,
+        )
+        for i, (label, grid) in enumerate(grids.items(), start=1):
+            g_crop = crop_grid(grid, bbox)
+            overlay = colorise_grid(patch_grid_to_thumbnail(
+                g_crop, (ch, cw),
+                (gy1 - gy0 + 1) * PATCH_SIZE,
+                (gx1 - gx0 + 1) * PATCH_SIZE,
+            ))
+            axes[r, i].imshow(overlay)
+            n_tls_c = int((g_crop == 1).sum())
+            n_gc_c = int((g_crop == 2).sum())
+            axes[r, i].set_title(f"TLS={n_tls_c} GC={n_gc_c}", fontsize=8)
+
+    fig.suptitle(
+        f"TLS (red) + GC (yellow) — {cancer_type} {slide_id}\n"
+        f"Row 0: full slide. Rows 1..{n_inst}: crops around GT instances (margin 2 cells).",
+        y=1.00, fontsize=10,
+    )
     fig.tight_layout()
     fig.savefig(out_path, dpi=120, bbox_inches="tight")
     plt.close(fig)
-    print(f"  saved {out_path}")
+    print(f"  saved {out_path} ({n_inst} instance crops)")
 
 
 # ── Main ─────────────────────────────────────────────────────────────────
@@ -262,6 +350,7 @@ def main():
     # Load models
     print("Loading models...")
     stage1 = load_stage1(CKPT_STAGE1, device)
+    stage1_v310 = load_stage1(CKPT_STAGE1_V310, device)
     stage2 = load_stage2_region(CKPT_CASC_S2, device)
     gncaf = load_gncaf_transunet(CKPT_GNCAF, device)
     # seg_v2.0 (dual)
@@ -292,12 +381,19 @@ def main():
         coords = grp["coords"][:]
         gt_grid = load_gt_grid(entry, slide_h, slide_w, coords)
 
-        # Cascade
+        # Cascade v3.7 (v3.8 Stage 1 + v3.37 Stage 2 — production champion)
         try:
             casc_grid = cascade_predict(stage1, stage2, entry, device)
         except Exception as e:
-            print(f"  cascade failed: {e}")
+            print(f"  cascade v3.7 failed: {e}")
             casc_grid = np.zeros_like(gt_grid)
+
+        # Cascade v3.10 (v3.10 hard-neg-only Stage 1 + v3.37 Stage 2 — high-prec variant)
+        try:
+            casc_v310_grid = cascade_predict(stage1_v310, stage2, entry, device)
+        except Exception as e:
+            print(f"  cascade v3.10 failed: {e}")
+            casc_v310_grid = np.zeros_like(gt_grid)
 
         # GNCAF
         try:
@@ -316,7 +412,8 @@ def main():
 
         grids = {
             "Ground truth": gt_grid,
-            "Cascade v3.37": casc_grid,
+            "Cascade v3.7": casc_grid,
+            "Cascade v3.10 (hi-prec)": casc_v310_grid,
             "GNCAF v3.65": gncaf_grid,
             "seg_v2.0 (dual)": sv2_grid,
         }
