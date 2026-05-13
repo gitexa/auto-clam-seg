@@ -49,14 +49,14 @@ Pushes Stage 1 toward higher precision / lower recall — useful as a
 primary patch-grid metric. Aux-loss family fully closed (no remaining
 variants to try). See `FP_REDUCTION_RESULTS.md` Strategy 1b section.
 
-## 3. Stage 2 TTA (test-time augmentation) — LOW EV but CHEAPEST
+## ~~3. Stage 2 TTA (test-time augmentation)~~ — RUN 2×, NEUTRAL (2026-05-13)
 
-**Hypothesis**: 4× flip/rotation Stage 2 inference → averaged logits →
-~0.5–1 mDice gain "for free". Doesn't reduce TLS-FP (per Strategy C
-analysis in `FP_REDUCTION_RESULTS.md`) but may improve segmentation
-quality on TLS-positive slides.
-
-**Cost**: ~30 min impl + ~25 min × 5 folds = **~2.5h**. No retraining.
+Implemented `tta=2x` (identity + horizontal flip averaging). Fold-0 result:
+patch-grid +0.008 mDice (in line with TTA expectations) but pixel-agg
+**−0.032 mDice**. Not a clean win — averaging blurs sharp pixel-precise
+edges. 5-fold + 4×/8× TTA skipped. Knob preserved in
+`eval_gars_cascade.py` for future use. See `FP_REDUCTION_RESULTS.md`
+Strategy C section.
 
 ## 4. Higher-resolution Stage 2 input — MEDIUM EV but HIGH RISK
 

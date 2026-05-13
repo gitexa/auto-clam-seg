@@ -62,16 +62,37 @@ lymphoid structure that the annotator missed.
 
 A.2 and B stack to no further benefit (they catch the same noise-FPs).
 
-## Strategy C — Test-time augmentation (skipped)
+## Strategy C — Test-time augmentation (2× hflip, 2026-05-13) — NEUTRAL
 
-C was planned to add 4× flip/rotation logit averaging to Stage 2. Given B
-showed that the residual 31.7 % TLS-FP comes from slides where Stage 1 has
-**confident** (>0.8 prob) TLS detections, TTA won't help — the FPs aren't
-spurious noise activations but consistent model-GT disagreement on real
-lymphoid structure. TTA may modestly improve Stage 2 segmentation Dice on
-the TLS-positive slides but won't push the slide-level FP rate below 32 %.
+Implemented as `tta=2x` knob in `eval_gars_cascade.py:_stage2_forward_tta`:
+Stage 2 forward runs twice (identity + horizontal flip of input cells +
+RGB spatial flip), output logits are inverse-flipped and averaged.
 
-**Skipped to save 4× inference compute.**
+### Fold-0 fullcohort result (n=165 slides)
+
+| Metric              | Baseline (no TTA) | TTA 2× | Delta  |
+|---------------------|-------------------|--------|--------|
+| patch-grid mDice    | 0.737             | 0.745  | +0.008 |
+| patch-grid TLS      | 0.613             | 0.613  | 0      |
+| patch-grid GC       | 0.861             | 0.877  | +0.016 |
+| **pixel-agg mDice** | 0.832             | 0.800  | **−0.032** |
+| pixel-agg TLS       | 0.816             | 0.803  | −0.013 |
+| pixel-agg GC        | 0.849             | 0.797  | −0.053 |
+
+### Verdict: NET NEUTRAL — not worth 5-fold
+
+Marginal patch-grid gain (+0.8%, in line with typical TTA expectations)
+is offset by a meaningful pixel-agg regression (−3.2%). Mechanism:
+averaging hflipped + identity logits smooths boundaries — preserves
+patch-level decisions but blurs pixel-precise edges. The model's
+predictions are sharper than its augmented average.
+
+TTA was originally hypothesised to help on FP rate (B analysis predicted
+no help there) and on segmentation Dice (a small help on patch-grid,
+confirmed). The pixel-agg regression is the new finding.
+
+**Skipped 5-fold (not a clean win) and skipped 4× / 8× TTA (gain
+direction confirmed but magnitude unlikely to flip the verdict).**
 
 ## Strategy E (Plan v2) — Stage 1 fine-tune with Stage 2 disagreement labels — NEGATIVE
 

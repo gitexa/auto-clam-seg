@@ -325,12 +325,44 @@ def cascade_one_slide_neighborhood(stage1, stage2_nbhd, features, coords,
     return grid_class, len(selected), pred_tiles
 
 
+_HFLIP_CELL_PERM = [2, 1, 0, 5, 4, 3, 8, 7, 6]
+
+
+def _stage2_forward_tta(stage2_region, b_rgb, b_uni, b_gat, b_val, tta: str):
+    """TTA wrapper for Stage 2 forward. Returns averaged logits.
+
+    tta='off' -> identity forward (single pass).
+    tta='2x'  -> identity + horizontal flip, averaged on logit scale.
+    """
+    logits1 = stage2_region(b_rgb, b_uni, b_gat, b_val)
+    if tta == "off":
+        return logits1
+    if tta == "2x":
+        perm = _HFLIP_CELL_PERM
+        rgb_h = torch.flip(b_rgb[:, perm], dims=[-1])
+        uni_h = b_uni[:, perm]
+        gat_h = b_gat[:, perm]
+        val_h = b_val[:, perm]
+        logits2 = stage2_region(rgb_h, uni_h, gat_h, val_h)
+        # Inverse-flip spatial output. Tuple (dual-sigmoid) or tensor.
+        if isinstance(logits1, tuple):
+            l1_tls, l1_gc = logits1
+            l2_tls, l2_gc = logits2
+            return (
+                (l1_tls + torch.flip(l2_tls, dims=[-1])) / 2,
+                (l1_gc + torch.flip(l2_gc, dims=[-1])) / 2,
+            )
+        return (logits1 + torch.flip(logits2, dims=[-1])) / 2
+    raise ValueError(f"unknown tta mode: {tta!r}")
+
+
 @torch.no_grad()
 def cascade_one_slide_region(stage1, stage2_region, features, coords, edge_index,
                              threshold, device, wsi_path, s2_batch=8,
                              min_component_size=2, closing_iters=1,
                              return_cell_probs: bool = False,
-                             multiscale_payload: dict | None = None):
+                             multiscale_payload: dict | None = None,
+                             tta: str = "off"):
     """v3.37 region-cascade: Stage 1 → connected components → 3×3 windows
     → RegionDecoder (RGB + UNI + graph). RGB tiles read from WSI .tif
     on demand (only for selected regions, not the full slide).
@@ -445,7 +477,7 @@ def cascade_one_slide_region(stage1, stage2_region, features, coords, edge_index
     for s in range(0, n_w, s2_batch):
         b_rgb = rgb_t[s : s + s2_batch]; b_uni = uni_t[s : s + s2_batch]
         b_gat = gat_t[s : s + s2_batch]; b_val = val_t[s : s + s2_batch]
-        logits = stage2_region(b_rgb, b_uni, b_gat, b_val)
+        logits = _stage2_forward_tta(stage2_region, b_rgb, b_uni, b_gat, b_val, tta)
         if isinstance(logits, tuple):
             # v3.38 dual-sigmoid head: independent TLS/GC sigmoid heads.
             # Build a pseudo-3-class probability tensor that matches the
@@ -740,6 +772,7 @@ def main(cfg: DictConfig) -> None:
                     min_component_size=int(cfg.get("min_component_size", 2)),
                     closing_iters=int(cfg.get("closing_iters", 1)),
                     multiscale_payload=multiscale_payload,
+                    tta=str(cfg.get("tta", "off")),
                 )
             elif neighborhood_mode:
                 grid_class, n_selected, pred_tiles = cascade_one_slide_neighborhood(
