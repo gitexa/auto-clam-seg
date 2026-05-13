@@ -1,0 +1,137 @@
+{
+  "ours": {
+    "overall": {
+      "tls_precision": 0.8771121351766513,
+      "tls_recall": 0.9548494983277592,
+      "tls_f1": 0.9143314651721377,
+      "tls_n_gt_pos": 598,
+      "tls_n_pred_pos": 651,
+      "gc_precision": 0.7643979057591623,
+      "gc_recall": 0.7053140096618358,
+      "gc_f1": 0.7336683417085427,
+      "gc_n_gt_pos": 207,
+      "gc_n_pred_pos": 191,
+      "n_slides": 804
+    },
+    "per_fold": {
+      "0": {
+        "tls_precision": 0.9015151515151515,
+        "tls_recall": 0.9596774193548387,
+        "tls_f1": 0.9296875,
+        "tls_n_gt_pos": 124,
+        "tls_n_pred_pos": 132,
+        "gc_precision": 0.8780487804878049,
+        "gc_recall": 0.9230769230769231,
+        "gc_f1": 0.9,
+        "gc_n_gt_pos": 39,
+        "gc_n_pred_pos": 41,
+        "n_slides": 165
+      },
+      "1": {
+        "tls_precision": 0.875968992248062,
+        "tls_recall": 0.9658119658119658,
+        "tls_f1": 0.9186991869918699,
+        "tls_n_gt_pos": 117,
+        "tls_n_pred_pos": 129,
+        "gc_precision": 0.75,
+        "gc_recall": 0.5675675675675675,
+        "gc_f1": 0.6461538461538462,
+        "gc_n_gt_pos": 37,
+        "gc_n_pred_pos": 28,
+        "n_slides": 157
+      },
+      "2": {
+        "tls_precision": 0.8968253968253969,
+        "tls_recall": 0.9416666666666667,
+        "tls_f1": 0.9186991869918699,
+        "tls_n_gt_pos": 120,
+        "tls_n_pred_pos": 126,
+        "gc_precision": 0.6829268292682927,
+        "gc_recall": 0.6829268292682927,
+        "gc_f1": 0.6829268292682927,
+        "gc_n_gt_pos": 41,
+        "gc_n_pred_pos": 41,
+        "n_slides": 162
+      },
+      "3": {
+        "tls_precision": 0.9016393442622951,
+        "tls_recall": 0.9166666666666666,
+        "tls_f1": 0.9090909090909091,
+        "tls_n_gt_pos": 120,
+        "tls_n_pred_pos": 122,
+        "gc_precision": 0.75,
+        "gc_recall": 0.673469387755102,
+        "gc_f1": 0.7096774193548387,
+        "gc_n_gt_pos": 49,
+        "gc_n_pred_pos": 44,
+        "n_slides": 159
+      },
+      "4": {
+        "tls_precision": 0.8169014084507042,
+        "tls_recall": 0.9914529914529915,
+        "tls_f1": 0.8957528957528957,
+        "tls_n_gt_pos": 117,
+        "tls_n_pred_pos": 142,
+        "gc_precision": 0.7567567567567568,
+        "gc_recall": 0.6829268292682927,
+        "gc_f1": 0.717948717948718,
+        "gc_n_gt_pos": 41,
+        "gc_n_pred_pos": 37,
+        "n_slides": 161
+      }
+    },
+    "per_cohort": {
+      "BLCA": {
+        "tls_precision": 0.8454935622317596,
+        "tls_recall": 0.985,
+        "tls_f1": 0.9099307159353349,
+        "tls_n_gt_pos": 200,
+        "tls_n_pred_pos": 233,
+        "gc_precision": 0.8064516129032258,
+        "gc_recall": 0.7653061224489796,
+        "gc_f1": 0.7853403141361257,
+        "gc_n_gt_pos": 98,
+        "gc_n_pred_pos": 93,
+        "n_slides": 268
+      },
+      "KIRC": {
+        "tls_precision": 0.8226950354609929,
+        "tls_recall": 0.8923076923076924,
+        "tls_f1": 0.8560885608856088,
+        "tls_n_gt_pos": 130,
+        "tls_n_pred_pos": 141,
+        "gc_precision": 0.8666666666666667,
+        "gc_recall": 0.5,
+        "gc_f1": 0.6341463414634146,
+        "gc_n_gt_pos": 26,
+        "gc_n_pred_pos": 15,
+        "n_slides": 239
+      },
+      "LUSC": {
+        "tls_precision": 0.9314079422382672,
+        "tls_recall": 0.9626865671641791,
+        "tls_f1": 0.9467889908256881,
+        "tls_n_gt_pos": 268,
+        "tls_n_pred_pos": 277,
+        "gc_precision": 0.6987951807228916,
+        "gc_recall": 0.6987951807228916,
+        "gc_f1": 0.6987951807228916,
+        "gc_n_gt_pos": 83,
+        "gc_n_pred_pos": 83,
+        "n_slides": 297
+      }
+    }
+  },
+  "hooknet": {
+    "TLS_precision": 0.94,
+    "TLS_recall": 0.85,
+    "TLS_f1": 0.89,
+    "GC_precision": 0.95,
+    "GC_recall": 0.4,
+    "GC_f1": 0.57,
+    "n_slides": 15,
+    "cohort": "USZ external IHC-validated",
+    "metric": "Object-detection F1 @ IoU>=0.5"
+  },
+  "note": "Ours: 5-fold CV on TCGA-{BLCA,KIRC,LUSC}, slide-level detection (gt_n_tls>0 vs n_tls_pred>0).\nHookNet: object-F1 at IoU>=0.5 on USZ external IHC-validated cohort (n=15), van Rijthoven et al. 2024."
+}

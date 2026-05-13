@@ -44,7 +44,12 @@ plt.rcParams.update({"figure.dpi": 110, "savefig.dpi": 130, "font.size": 9})
 
 APPROACH_COLORS = {
     "Cascade":         "#1f77b4",
+    "Cascade v3.7":    "#1f77b4",
     "Cascade v3.37":   "#1f77b4",
+    "Cascade v3.10 (hi-prec)":           "#0a3c5c",
+    "Cascade v3.46 (S2 retrain)":        "#5d8aaf",
+    "Cascade v3.60 (multi-scale)":       "#a0c4d8",
+    "Cascade v3.7 + TTA-2x":             "#3a7eb8",
     "GNCAF v3.21":     "#ff7f0e",
     "GNCAF v3.58":     "#d62728",
     "GNCAF v3.59":     "#2ca02c",
@@ -59,6 +64,7 @@ APPROACH_COLORS = {
     "Lost-0.7143":     "#e377c2",
     "seg_v2.0":        "#7f7f7f",
     "seg_v2.0 (dual)": "#525252",
+    "HookNet-TLS (van Rijthoven 2024)":  "#000000",
 }
 
 
@@ -73,7 +79,7 @@ def fig_5fold_bars(df: pd.DataFrame):
     metrics = [("mDice_pix", "mean Dice (pixel-agg)"),
                ("tls_dice_pix", "TLS Dice (pixel-agg)"),
                ("gc_dice_pix", "GC Dice (pixel-agg)")]
-    approaches = ["Cascade", "GNCAF v3.58", "GNCAF v3.56", "seg_v2.0"]
+    approaches = ["Cascade v3.7", "Cascade v3.10 (hi-prec)", "Cascade v3.46 (S2 retrain)", "Cascade v3.60 (multi-scale)", "Cascade v3.7 + TTA-2x", "GNCAF v3.58", "GNCAF v3.56", "seg_v2.0"]
     fig, axes = plt.subplots(1, 3, figsize=(13, 4.0), sharey=True)
     for ax, (m, label) in zip(axes, metrics):
         means, stds = [], []
