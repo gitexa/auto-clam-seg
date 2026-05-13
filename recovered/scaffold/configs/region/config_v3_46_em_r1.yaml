@@ -1,0 +1,38 @@
+defaults:
+  - model: region_h64
+  - train: region
+  - _self_
+
+stage: region
+label: v3.46_em_round1_on_v3.9
+seed: 42
+out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
+
+# Strategy 2 round 1: retrain Stage 2 with v3.9 Stage 1 as the frozen selector.
+# v3.9 was trained with aux-loss on Stage-2-disagreement labels (Strategy 1).
+# Stage 1 F1 climbed 0.56 -> 0.66 but cascade DROPPED 0.717 -> 0.688 because
+# v3.37 Stage 2 was trained on v3.8 selections. This config aligns Stage 2
+# to v3.9's patch distribution.
+stage1: /home/ubuntu/ahaas-persistent-std-tcga/experiments/gars_stage1_v3.9_aux_finetune_fold0_20260512_224433/best_checkpoint.pt
+
+data:
+  cache_path: /home/ubuntu/local_data/tls_patch_dataset_min4096.pt
+  max_windows_per_slide: 64
+  tile_clusters: true
+  stride: 2
+
+wandb:
+  enabled: true
+  project: tls-pixel-seg
+  entity: null
+  mode: ${oc.env:WANDB_MODE,online}
+  tags: [v3, region, cascade-v2, em_round1, strategy_2]
+
+hydra:
+  run:
+    dir: ${out_root}/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+  sweep:
+    dir: ${out_root}/multirun/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+    subdir: ${hydra.job.num}_${hydra.job.override_dirname}
+  job:
+    chdir: false
