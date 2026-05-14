@@ -1,0 +1,38 @@
+defaults:
+  - _self_
+
+stage: cascade
+label: v3.11_joint_fold0
+seed: 42
+out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
+
+stage1_ckpt: /home/ubuntu/ahaas-persistent-std-tcga/experiments/gars_stage1_v3.8_gatv2_5hop_20260501_043445/best_checkpoint.pt
+stage2_ckpt: /home/ubuntu/ahaas-persistent-std-tcga/experiments/gars_region_v3.37_full_20260502_144124/best_checkpoint.pt
+
+fold_idx: 0
+k_folds: 5
+
+train:
+  epochs: 8
+  lr_stage1: 1.0e-5
+  lr_stage2: 1.0e-5
+  weight_decay: 1.0e-4
+  threshold: 0.5
+  max_windows_per_slide: 8
+  val_max_windows_per_slide: 16
+  class_weights: [1.0, 5.0, 3.0]
+  gc_dice_weight: 1.0
+  s1_pos_weight: 5.0
+  stage1_bce_weight: 0.5
+
+wandb:
+  enabled: false
+  project: tls-pixel-seg
+  entity: null
+  mode: disabled
+
+hydra:
+  run:
+    dir: ${out_root}/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+  job:
+    chdir: false
