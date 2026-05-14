@@ -32,6 +32,9 @@ from eval_gars_gncaf_transunet import load_gncaf_transunet, eval_one_slide as gn
 from eval_gars_gncaf_transunet import _load_features_and_graph
 
 PATCH_SIZE = 256
+# Per-instance crop level: 2 = 4 µm/px (4x downsample from level 0).
+# Each patch-grid cell is 256 level-0 px = 64 px at level 2 = visible TLS detail.
+CROP_LEVEL = 2
 OUT = Path("/home/ubuntu/auto-clam-seg/notebooks/architectures/qualitative_comparisons")
 OUT.mkdir(parents=True, exist_ok=True)
 
@@ -240,9 +243,37 @@ def crop_thumb(thumb: np.ndarray, bbox: tuple[int, int, int, int],
     return thumb[y0:y1, x0:x1]
 
 
+def crop_wsi_region(wsi_path: str, bbox: tuple[int, int, int, int],
+                    level: int = CROP_LEVEL) -> np.ndarray:
+    """Read a high-res WSI region defined by a patch-grid bbox.
+
+    bbox is (gy0, gx0, gy1, gx1) inclusive in patch-grid coords. Each cell
+    is PATCH_SIZE level-0 px. Returns the level-`level` crop covering that
+    grid region.
+    """
+    gy0, gx0, gy1, gx1 = bbox
+    scale = 2 ** level
+    # Level-0 coords
+    y0_l0 = gy0 * PATCH_SIZE; y1_l0 = (gy1 + 1) * PATCH_SIZE
+    x0_l0 = gx0 * PATCH_SIZE; x1_l0 = (gx1 + 1) * PATCH_SIZE
+    # Level coords
+    y0 = y0_l0 // scale; y1 = y1_l0 // scale
+    x0 = x0_l0 // scale; x1 = x1_l0 // scale
+    wz = zarr.open(tifffile.imread(wsi_path, aszarr=True, level=level), mode="r")
+    H, W = wz.shape[:2]
+    y0 = max(0, y0); x0 = max(0, x0)
+    y1 = min(H, y1); x1 = min(W, x1)
+    arr = np.asarray(wz[y0:y1, x0:x1])
+    # In case page is single-channel grayscale, broadcast to RGB
+    if arr.ndim == 2:
+        arr = np.stack([arr, arr, arr], axis=-1)
+    return arr
+
+
 def render_panel(thumb_rgb: np.ndarray, grids: dict[str, np.ndarray],
                  slide_h_pix: int, slide_w_pix: int, slide_id: str,
-                 cancer_type: str, out_path: Path):
+                 cancer_type: str, out_path: Path,
+                 wsi_path: str | None = None):
     """Render full-slide row + per-instance crop rows.
 
     Row 0: WSI thumbnail | Ground truth | model_1 | model_2 | ...
@@ -279,27 +310,54 @@ def render_panel(thumb_rgb: np.ndarray, grids: dict[str, np.ndarray],
         n_gc = int((grid == 2).sum())
         ax.set_title(f"{label}\nTLS={n_tls} GC={n_gc}", fontsize=8)
 
-    # ── Rows 1..N: per-GT-instance crops ─────────────────────────
+    # ── Rows 1..N: per-GT-instance crops (HIGH-RES level-CROP_LEVEL tissue) ─────
     for r, bbox in enumerate(bboxes, start=1):
-        thumb_crop = crop_thumb(thumb_rgb, bbox, slide_h_pix, slide_w_pix)
-        ch, cw = thumb_crop.shape[:2]
+        # Read high-res WSI region for this instance
+        if wsi_path is not None:
+            try:
+                region = crop_wsi_region(wsi_path, bbox, level=CROP_LEVEL)
+            except Exception as ex:
+                print(f"  high-res crop failed for inst {r}: {ex}")
+                region = crop_thumb(thumb_rgb, bbox, slide_h_pix, slide_w_pix)
+        else:
+            region = crop_thumb(thumb_rgb, bbox, slide_h_pix, slide_w_pix)
+        ch, cw = region.shape[:2]
 
         for c, ax in enumerate(axes[r]):
             ax.set_xticks([]); ax.set_yticks([])
-            ax.imshow(thumb_crop)
+            ax.imshow(region)
 
         gy0, gx0, gy1, gx1 = bbox
+        # Show physical size at top of column 0 (level 2 = 4 µm/px assuming 20x baseline)
+        physical_um = (gy1 - gy0 + 1) * PATCH_SIZE * 0.5  # 0.5 µm/px at level 0
         axes[r, 0].set_title(
-            f"Instance {r} crop\n(g[{gy0}:{gy1+1}, {gx0}:{gx1+1}])", fontsize=8,
+            f"Instance {r} (~{physical_um:.0f} µm tall)\n"
+            f"g[{gy0}:{gy1+1}, {gx0}:{gx1+1}], L{CROP_LEVEL} tissue",
+            fontsize=8,
         )
         for i, (label, grid) in enumerate(grids.items(), start=1):
-            g_crop = crop_grid(grid, bbox)
+            # Pad grid to match GT bbox extent if it's smaller
+            need_h = bbox[2] + 1
+            need_w = bbox[3] + 1
+            if grid.shape[0] < need_h or grid.shape[1] < need_w:
+                pad_h = max(0, need_h - grid.shape[0])
+                pad_w = max(0, need_w - grid.shape[1])
+                grid_padded = np.pad(grid, ((0, pad_h), (0, pad_w)))
+            else:
+                grid_padded = grid
+            g_crop = crop_grid(grid_padded, bbox)
+            if g_crop.shape[0] == 0 or g_crop.shape[1] == 0:
+                axes[r, i].set_title("(out of bounds)", fontsize=8)
+                continue
+            cell_px = PATCH_SIZE // (2 ** CROP_LEVEL)
+            target_h = max(1, g_crop.shape[0] * cell_px)
+            target_w = max(1, g_crop.shape[1] * cell_px)
             overlay = colorise_grid(patch_grid_to_thumbnail(
-                g_crop, (ch, cw),
-                (gy1 - gy0 + 1) * PATCH_SIZE,
-                (gx1 - gx0 + 1) * PATCH_SIZE,
+                g_crop, (target_h, target_w),
+                g_crop.shape[0] * PATCH_SIZE, g_crop.shape[1] * PATCH_SIZE,
             ))
-            axes[r, i].imshow(overlay)
+            axes[r, i].imshow(region, extent=(0, target_w, target_h, 0))
+            axes[r, i].imshow(overlay, extent=(0, target_w, target_h, 0))
             n_tls_c = int((g_crop == 1).sum())
             n_gc_c = int((g_crop == 2).sum())
             axes[r, i].set_title(f"TLS={n_tls_c} GC={n_gc_c}", fontsize=8)
@@ -417,7 +475,8 @@ def main():
             "GNCAF v3.65": gncaf_grid,
             "seg_v2.0 (dual)": sv2_grid,
         }
-        render_panel(thumb, grids, slide_h, slide_w, short_id, ct, out_path)
+        render_panel(thumb, grids, slide_h, slide_w, short_id, ct, out_path,
+                     wsi_path=wsi_path)
 
 
 if __name__ == "__main__":
