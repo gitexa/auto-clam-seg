@@ -1,0 +1,51 @@
+defaults:
+  - _self_
+
+stage: cascade
+label: v3.12_proposalA_fold0
+seed: 42
+out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
+
+fold_idx: 0
+k_folds: 5
+
+s1:
+  in_dim: 1536
+  hidden_dim: 256
+  n_hops: 5
+  gnn_type: gatv2
+  dropout: 0.1
+  gat_heads: 4
+
+s2:
+  uni_dim: 1536
+  gat_dim: 256
+  hidden_channels: 64
+  n_classes: 3
+  grid_n: 3
+  rgb_pretrained: true
+  freeze_rgb_encoder: false
+
+train:
+  epochs: 15
+  lr_stage1: 3.0e-4
+  lr_stage2: 3.0e-4
+  weight_decay: 1.0e-4
+  eps_start: 0.5
+  eps_end: 0.05
+  max_windows_per_slide: 8
+  val_max_windows_per_slide: 16
+  class_weights: [1.0, 5.0, 3.0]
+  gc_dice_weight: 1.0
+  s1_pos_weight: 5.0
+  w_s1: 0.5
+  w_ent: 0.01
+
+wandb:
+  enabled: false
+
+hydra:
+  run:
+    dir: ${out_root}/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+  job:
+    chdir: false
