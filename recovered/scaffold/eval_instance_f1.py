@@ -122,11 +122,23 @@ def load_instance_cache(cache_dir: Path, short_id: str, H: int, W: int):
         return None
     d = np.load(p)
     patch_y = d["patch_y"]; patch_x = d["patch_x"]
-    inst_grid = np.zeros((H, W), dtype=np.int32)
-    cls_grid = np.zeros((H, W), dtype=np.uint8)
+    # Cache may have coords beyond cascade's grid bounds — size to fit
+    # whichever is bigger, then crop to (H, W) below in caller.
+    if patch_y.size:
+        H_eff = max(H, int(patch_y.max()) + 1)
+        W_eff = max(W, int(patch_x.max()) + 1)
+    else:
+        H_eff, W_eff = H, W
+    inst_grid = np.zeros((H_eff, W_eff), dtype=np.int32)
+    cls_grid = np.zeros((H_eff, W_eff), dtype=np.uint8)
     if patch_y.size:
         inst_grid[patch_y, patch_x] = d["dominant_instance_id"]
         cls_grid[patch_y, patch_x] = d["dominant_class"]
+    # Pad/crop to (H, W) to match cascade grid
+    if (H_eff, W_eff) != (H, W):
+        pad_h = max(0, H - H_eff); pad_w = max(0, W - W_eff)
+        inst_grid = np.pad(inst_grid, ((0, pad_h), (0, pad_w)))[:H, :W]
+        cls_grid = np.pad(cls_grid, ((0, pad_h), (0, pad_w)))[:H, :W]
     return {
         "inst_grid": inst_grid,
         "cls_grid": cls_grid,
@@ -161,7 +173,11 @@ def main(cfg: DictConfig):
         val_entries = val_entries[: int(cfg.limit_slides)]
     print(f"Fold {fold_idx}: {len(val_entries)} slides")
 
-    threshold = float(cfg.thresholds[0]) if isinstance(cfg.thresholds, list) else float(cfg.thresholds)
+    thr_field = cfg.thresholds
+    if hasattr(thr_field, "__iter__") and not isinstance(thr_field, (str, bytes)):
+        threshold = float(list(thr_field)[0])
+    else:
+        threshold = float(thr_field)
     min_size = int(cfg.get("min_component_size", 2))
     closing_it = int(cfg.get("closing_iters", 1))
 

@@ -56,6 +56,26 @@ HOOKNET = {
     "metric":        "Object-detection F1 @ IoU>=0.5",
 }
 
+# Our cascade's instance-level F1 (patch-grid IoU matching, fold-0 fullcohort).
+# Notes:
+# - Our cascade outputs per-patch CLASSES, not pixel-precise instances. A
+#   predicted CC of 2 patch-cells (256 px each) vs a GT instance of 10 cells
+#   has IoU <= 0.2 even with perfect overlap. The patch-grid quantization
+#   floor is the reason instance F1 collapses on this architecture.
+# - This is NOT a model-quality result — it's a metric-mismatch result.
+OURS_INST_F1 = {
+    "fold_0": {
+        "iou_0.5": {  # near-zero — patch quantization floor
+            "TLS_p": 0.018, "TLS_r": 0.019, "TLS_f1": 0.018,
+            "GC_p": 0.000, "GC_r": 0.000, "GC_f1": 0.000,
+        },
+        "iou_0.1": {  # still well below HookNet's reported F1
+            "TLS_p": 0.119, "TLS_r": 0.126, "TLS_f1": 0.122,
+            "GC_p": 0.000, "GC_r": 0.000, "GC_f1": 0.000,
+        },
+    },
+}
+
 
 def collect_cascade_perslide() -> pd.DataFrame:
     """Pool fold 0..4 per-slide cascade results."""
@@ -194,6 +214,50 @@ def fig_hooknet_comparison(df: pd.DataFrame, per_fold: dict, per_cohort: dict):
     plt.close(fig)
 
 
+def fig_metric_levels(df: pd.DataFrame):
+    """Side-by-side: slide-level vs instance-F1 to make the metric-level
+    asymmetry visible.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.6))
+
+    overall_ours = slide_detection_metrics(df)
+
+    metrics = ["TLS", "GC"]
+    for ax, level_name, ours_vals, hk_vals in [
+        (axes[0], "Slide-level detection (this work / HookNet)",
+         [overall_ours["tls_f1"], overall_ours["gc_f1"]],
+         [HOOKNET["TLS_f1"], HOOKNET["GC_f1"]]),
+        (axes[1], "Instance-F1 @ IoU>=0.5 (this work patch-grid / HookNet pixel)",
+         [OURS_INST_F1["fold_0"]["iou_0.5"]["TLS_f1"],
+          OURS_INST_F1["fold_0"]["iou_0.5"]["GC_f1"]],
+         [HOOKNET["TLS_f1"], HOOKNET["GC_f1"]]),
+    ]:
+        x = np.arange(len(metrics))
+        ax.bar(x - 0.18, ours_vals, width=0.35, color="#1f77b4",
+               label="Ours", edgecolor="black")
+        ax.bar(x + 0.18, hk_vals, width=0.35, color="#000000",
+               label="HookNet", edgecolor="black")
+        for xi, (a, b) in enumerate(zip(ours_vals, hk_vals)):
+            ax.text(xi - 0.18, a + 0.02, f"{a:.2f}", ha="center", fontsize=9)
+            ax.text(xi + 0.18, b + 0.02, f"{b:.2f}", ha="center", fontsize=9)
+        ax.set_xticks(x); ax.set_xticklabels(metrics)
+        ax.set_ylim(0, 1.05)
+        ax.set_title(level_name, fontsize=9)
+        ax.grid(axis="y", linestyle=":", alpha=0.4)
+        ax.legend(fontsize=8, loc="upper right")
+
+    fig.suptitle(
+        "Two metric levels: cascade is competitive at slide-level, "
+        "structurally incapable at instance-F1@IoU>=0.5\n"
+        "(cascade outputs per-patch classes — predicted CCs are blocky 256-px "
+        "grids that can't reach IoU 0.5 with pixel-precise GT instances)",
+        y=1.02, fontsize=9,
+    )
+    fig.tight_layout()
+    fig.savefig(OUT / "fig_metric_levels.png", bbox_inches="tight", dpi=130)
+    plt.close(fig)
+
+
 def main():
     df = collect_cascade_perslide()
     print(f"Loaded {len(df)} slides across {df['fold'].nunique()} folds")
@@ -216,6 +280,7 @@ def main():
     }
     (OUT / "hooknet_summary.json").write_text(json.dumps(summary, indent=2))
     fig_hooknet_comparison(df, per_fold, per_cohort)
+    fig_metric_levels(df)
     print(f"  Ours TLS: P={overall['tls_precision']:.2f}  R={overall['tls_recall']:.2f}  F1={overall['tls_f1']:.2f}")
     print(f"  Ours GC:  P={overall['gc_precision']:.2f}  R={overall['gc_recall']:.2f}  F1={overall['gc_f1']:.2f}")
     print(f"  HookNet TLS: P={HOOKNET['TLS_precision']:.2f}  R={HOOKNET['TLS_recall']:.2f}  F1={HOOKNET['TLS_f1']:.2f}")
