@@ -4,11 +4,12 @@ Date: 2026-05-14
 
 ## TL;DR
 
-The 2026-05-13 sprint ran every end2end cascade training strategy the
+The 2026-05-13/14 sprint ran every end2end cascade training strategy the
 previous plan proposed (aux-loss positive+negative, hard-negative-only,
 Stage 2 retrain on the aux-trained Stage 1, multi-scale Stage 1) plus a
-TTA control. All variants are NEGATIVE on the production patch-grid mDice
-metric vs v3.7 (fold-0 mDice 0.737):
+TTA control AND a direct joint fine-tune (v3.11 — unfreezing both stages
+from converged ckpts). All variants are NEUTRAL or NEGATIVE on the
+production patch-grid mDice metric vs v3.7 (fold-0 mDice 0.737):
 
 | Variant | Hypothesis | Fold-0 result vs v3.7 | Verdict |
 |---|---|---|---|
@@ -16,6 +17,7 @@ metric vs v3.7 (fold-0 mDice 0.737):
 | **v3.10** Strategy 1b (hard-neg only, w=0.3) | only push DOWN on FP-fired patches | mDice 0.737 → 0.667 (patch-grid) / 0.832 → 0.896 (pixel-agg) | NEG patch / **POS pixel** |
 | **v3.46** Strategy 2 (retrain Stage 2 on v3.9) | re-align Stage 2 to v3.9's selection | mDice 0.737 → 0.628; GC 0.86 → 0.69 | **STRONG NEG** |
 | **v3.60** multi-scale Stage 1 + paired Stage 2 | bipartite 256+512 px context | mDice 0.737 → 0.682; pixel-agg GC 0.85 → 0.48 | **STRONG NEG** |
+| **v3.11** joint fine-tune both stages (NEW, 2026-05-14) | unfreeze v3.8+v3.37, joint LR 1e-5, slide-level joint forward, 8 epochs | mDice 0.737 → 0.722; pixel-agg +0.005; val loss 1.24 → 1.11 | **NEG (marginal)** |
 | TTA 2x (control) | flip-average Stage 2 inference | patch-grid +0.008; pixel-agg −0.032 | NEUTRAL |
 
 This document is the postmortem on **why** none of these end2end recipes
@@ -112,6 +114,58 @@ selects.
 This is the cleanest demonstration that the cascade is a **tightly
 coupled system**: one-sided fine-tunes (Stage 1 → Stage 2) break the
 joint optimum that sequential training had reached.
+
+### v3.11 — joint fine-tune Stage 1 + Stage 2 (NEW, 2026-05-14)
+
+**What changed**: load v3.8 Stage 1 + v3.37 Stage 2 from their converged
+sequential-training ckpts. **Unfreeze BOTH** (`requires_grad=True`,
+`.train()`). Train jointly with one AdamW optimizer at per-stage LR=1e-5
+(both stages). Slide-level forward: Stage 1 over the full graph,
+threshold-select patches, Stage 2 over selected 3×3 windows. Joint loss
+= Stage 2 pixel CE+Dice + 0.5 · Stage 1 BCE on patch labels. NaN-skip
+guards on optimizer step. 8 epochs.
+
+This is the most direct empirical test of postmortem Cause 3 — "the
+joint loss surface is non-convex on coupled training." If unfreezing
+both stages and letting joint gradient flow can escape the v3.7 local
+optimum, mDice should improve.
+
+**Empirical signature**:
+
+| | v3.7 (baseline) | v3.11 | Δ |
+|---|---|---|---|
+| Training val_loss (per joint epoch) | n/a | 1.24 → 1.11 (BEST ep 7) | −0.13 |
+| Cascade patch-grid mDice | 0.737 | 0.722 | **−0.015** |
+| Cascade patch-grid TLS | 0.613 | 0.582 | −0.031 |
+| Cascade patch-grid GC | 0.861 | 0.863 | +0.002 |
+| Cascade pixel-agg mDice | 0.832 | 0.837 | +0.005 |
+| Cascade pixel-agg TLS | 0.816 | 0.824 | +0.008 |
+| Cascade pixel-agg GC | 0.849 | 0.851 | +0.002 |
+
+Per-cancer fold-0 cascade @ thr=0.5:
+- BLCA: TLS 0.584 (vs ~0.634 baseline), GC 0.811 (vs 0.793)
+- KIRC: TLS 0.626 (vs ~0.677), GC 0.973 (vs 0.971)
+- LUSC: TLS 0.544 (vs ~0.545), GC 0.818 (vs 0.829)
+
+**Mechanism**: training val_loss DID decrease meaningfully (1.24 → 1.11
+over 7 epochs), demonstrating that joint optimization moves in a sensible
+direction in the loss landscape. **But cascade mDice is essentially
+unchanged** — the patch-grid metric and the training loss are
+misaligned. Stage 2's per-window pixel CE+Dice loss decreases while
+Stage 1's selection drifts, producing window-level outputs that score
+slightly better at pixel level but fail to translate to slide-level
+cascade improvements. The model has drifted laterally along the loss
+basin floor (per Cause 3).
+
+The pixel-agg metric improves marginally (+0.005 mDice) — consistent
+with Stage 2 producing slightly higher-overlap masks for the patches
+Stage 1 still selects. But this gain is dwarfed by the cohort variance
+in 5-fold CV (±0.040 mDice).
+
+**Verdict**: NEUTRAL / marginally NEGATIVE on the production metric.
+Empirically confirms postmortem Cause 3 — joint fine-tune from sequential
+ckpts moves laterally in the loss surface, not down. Postmortem
+prediction validated.
 
 ### v3.60 — multi-scale Stage 1 + paired Stage 2
 
