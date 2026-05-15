@@ -1,0 +1,48 @@
+defaults:
+  - _self_
+
+stage: cascade
+label: v3.13_joint_cont_fold0
+seed: 42
+out_root: /home/ubuntu/ahaas-persistent-std-tcga/experiments
+
+# v3.13: continue v3.11 joint fine-tune. Goal: improve slide-level R²
+# (v3.11 hit 0.749 TLS / 0.906 GC vs v3.7 0.707/0.911).
+# Changes from v3.11:
+#   - Start from v3.11 best ckpt (epoch 7, val_loss 1.11)
+#   - max_windows_per_slide 8 -> 16 (more training signal/epoch)
+#   - lr_stage1 1e-5 -> 2e-5
+#   - lr_stage2 1e-5 -> 3e-5 (Stage 2 has more headroom)
+#   - stage1_bce_weight 0.5 -> 0.3 (let pixel loss dominate)
+#   - 10 epochs
+stage1_ckpt: /home/ubuntu/ahaas-persistent-std-tcga/experiments/gars_cascade_v3.11_joint_v2_fold0_20260514_070326/stage1_extracted.pt
+stage2_ckpt: /home/ubuntu/ahaas-persistent-std-tcga/experiments/gars_cascade_v3.11_joint_v2_fold0_20260514_070326/stage2_extracted.pt
+
+fold_idx: 0
+k_folds: 5
+
+train:
+  epochs: 10
+  lr_stage1: 2.0e-5
+  lr_stage2: 3.0e-5
+  weight_decay: 1.0e-4
+  threshold: 0.5
+  max_windows_per_slide: 16
+  val_max_windows_per_slide: 16
+  class_weights: [1.0, 5.0, 3.0]
+  gc_dice_weight: 1.0
+  s1_pos_weight: 5.0
+  stage1_bce_weight: 0.3
+
+wandb:
+  enabled: true
+  project: tls-pixel-seg
+  entity: null
+  mode: online
+  tags: [v3.13, joint, cascade, e2e, continuation]
+
+hydra:
+  run:
+    dir: ${out_root}/gars_${stage}_${label}_${now:%Y%m%d_%H%M%S}
+  job:
+    chdir: false

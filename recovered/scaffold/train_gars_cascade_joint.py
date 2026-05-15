@@ -129,10 +129,15 @@ def joint_forward(stage1, stage2, entry, device, threshold=0.5,
         wsi_z = wsi_zarr_cache[1]
     new_cache = (wsi_path, wsi_z)
 
-    # GT mask zarr if exists
+    # GT mask zarr if exists. For GT-NEGATIVE slides we have no per-pixel
+    # supervision for Stage 2 — skip Stage 2 loss entirely (return None).
     gt_z = None
     if mask_path and Path(mask_path).exists():
         gt_z = zarr.open(tifffile.imread(mask_path, aszarr=True, level=0), mode="r")
+    else:
+        # GT-negative slide: Stage 1 BCE still applies (target = all 0), but
+        # Stage 2 has nothing to supervise against. Return early.
+        return None, None, s1_logits, s1_target
 
     n_w = len(selected)
     rgb_buf = np.zeros((n_w, G * G, 3, PATCH, PATCH), dtype=np.float32)
@@ -156,10 +161,16 @@ def joint_forward(stage1, stage2, entry, device, threshold=0.5,
             tile = _read_target_rgb_tile(wsi_z, x0, y0)
             rgb_buf[wi, k] = _normalise_rgb(tile).numpy()
             if gt_z is not None:
-                gt_tile = np.asarray(gt_z[y0:y0 + PATCH, x0:x0 + PATCH])
-                # Place into 3x3 grid
+                # Clamp to slide bounds; tile may be partial near edges.
+                gt_H, gt_W = gt_z.shape
+                y_lo = min(y0, gt_H); y_hi = min(y0 + PATCH, gt_H)
+                x_lo = min(x0, gt_W); x_hi = min(x0 + PATCH, gt_W)
+                if y_hi <= y_lo or x_hi <= x_lo:
+                    continue
+                gt_tile = np.asarray(gt_z[y_lo:y_hi, x_lo:x_hi])
+                h_use, w_use = gt_tile.shape
                 pyy = dy * PATCH; pxx = dx * PATCH
-                mask_buf[wi, pyy:pyy + PATCH, pxx:pxx + PATCH] = gt_tile
+                mask_buf[wi, pyy:pyy + h_use, pxx:pxx + w_use] = gt_tile
 
     rgb_t = torch.from_numpy(rgb_buf).to(device)
     uni_t = torch.from_numpy(uni_buf).to(device)
@@ -206,12 +217,27 @@ def train_epoch(stage1, stage2, train_entries, optimizer, device, cfg,
             loss = loss + s1_w * ls1
         if isinstance(loss, float):
             continue
+        # Skip optimizer step on non-finite losses (bad slide / numerical
+        # edge case) to avoid corrupting model params with NaN gradients.
+        loss_val = float(loss.detach())
+        if not np.isfinite(loss_val):
+            optimizer.zero_grad(set_to_none=True)
+            continue
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
+        # Also skip step if any grad is non-finite after backward.
+        any_nan_grad = False
+        for p in list(stage1.parameters()) + list(stage2.parameters()):
+            if p.grad is not None and not torch.isfinite(p.grad).all():
+                any_nan_grad = True
+                break
+        if any_nan_grad:
+            optimizer.zero_grad(set_to_none=True)
+            continue
         torch.nn.utils.clip_grad_norm_(stage1.parameters(), 1.0)
         torch.nn.utils.clip_grad_norm_(stage2.parameters(), 1.0)
         optimizer.step()
-        tot_loss += float(loss.detach())
+        tot_loss += loss_val
         tot_s2 += loss_s2; tot_s1 += loss_s1
         n_iter += 1
         if (slide_idx + 1) % 50 == 0:
@@ -244,7 +270,10 @@ def val_epoch(stage1, stage2, val_entries, device, cfg):
                                 class_weights=cw,
                                 gc_dice_weight=cfg.train.gc_dice_weight,
                                 ignore_index=-100)
-            tot_loss += float(l.detach()); n += 1
+            lv = float(l.detach())
+            if not np.isfinite(lv):
+                continue
+            tot_loss += lv; n += 1
     return {"val_loss": tot_loss / max(1, n), "n_slides_evald": n}
 
 
@@ -294,6 +323,21 @@ def main(cfg: DictConfig):
             train_entries.extend(folds[f])
     print(f"Fold {fold_idx}: train={len(train_entries)}, val={len(val_entries)}")
 
+    # wandb
+    wb = None
+    if cfg.get("wandb", {}).get("enabled", False):
+        import wandb
+        wb = wandb.init(
+            project=cfg.wandb.get("project", "tls-pixel-seg"),
+            entity=cfg.wandb.get("entity"),
+            name=out_dir.name,
+            config=OmegaConf.to_container(cfg, resolve=True),
+            dir=str(out_dir),
+            mode=cfg.wandb.get("mode", "online"),
+            tags=list(cfg.wandb.get("tags", [])),
+        )
+        print(f"wandb: synced run {wb.name}")
+
     best_val = float("inf"); best_epoch = -1
     for ep in range(1, int(cfg.train.epochs) + 1):
         t0 = time.time()
@@ -308,6 +352,18 @@ def main(cfg: DictConfig):
         print(f"EPOCH ep={ep} train_loss={tr['loss']:.4f} s2={tr['s2_loss']:.4f} "
               f"s1={tr['s1_loss']:.4f} val_loss={va['val_loss']:.4f} "
               f"({tr_t:.0f}s/{v_t:.0f}s){marker}")
+        if wb is not None:
+            wb.log({
+                "epoch": ep,
+                "train/loss": tr["loss"],
+                "train/s2_loss": tr["s2_loss"],
+                "train/s1_loss": tr["s1_loss"],
+                "val/loss": va["val_loss"],
+                "val/n_slides": va["n_slides_evald"],
+                "epoch_time/train_s": tr_t,
+                "epoch_time/val_s": v_t,
+                "is_best": int(is_best),
+            }, step=ep)
         if is_best:
             best_val = va["val_loss"]; best_epoch = ep
             torch.save({
